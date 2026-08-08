@@ -39,6 +39,7 @@ static char BASED_CODE THIS_FILE[] = __FILE__;
 CLIPFORMAT cfEmbeddedObject;
 CLIPFORMAT cfRTF;
 CLIPFORMAT cfRTO;
+CLIPFORMAT cfHTML;
 
 int CWordPadApp::m_nOpenMsg = RegisterWindowMessage(_T("WordPadOpenMessage"));
 int CWordPadApp::m_nPrinterChangedMsg = RegisterWindowMessage(_T("WordPadPrinterChanged"));
@@ -213,7 +214,7 @@ BOOL CWordPadApp::InitInstance()
 	RegisterFormats();
 
 	// Initialize RichEdit control
-	if (LoadLibrary(_T("RICHED32.DLL")) == NULL)
+	if (LoadLibrary(_T("Msftedit.dll")) == NULL)
 	{
 		AfxMessageBox(IDS_RICHED_LOAD_FAIL, MB_OK|MB_ICONEXCLAMATION);
 		return FALSE;
@@ -366,6 +367,8 @@ void CWordPadApp::RegisterFormats()
 	cfEmbeddedObject = (CLIPFORMAT)::RegisterClipboardFormat(_T("Embedded Object"));
 	cfRTF = (CLIPFORMAT)::RegisterClipboardFormat(CF_RTF);
 	cfRTO = (CLIPFORMAT)::RegisterClipboardFormat(CF_RETEXTOBJ);
+    cfHTML = (CLIPFORMAT)RegisterClipboardFormat(
+        _T("HTML Format"));
 }
 
 CDocOptions& CWordPadApp::GetDocOptions(int nDocType)
@@ -563,7 +566,7 @@ int CWordPadApp::ExitInstance()
 {
 	m_pszHelpFilePath = NULL;
 
-	HMODULE h = GetModuleHandle(_T("RICHED32.DLL"));
+	HMODULE h = GetModuleHandle(_T("Msftedit.dll"));
 	if (h != NULL)
 	{
 		FreeLibrary(h);

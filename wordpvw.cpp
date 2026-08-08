@@ -26,8 +26,13 @@
 #include "pageset.h"
 //#include <penwin.h>
 
+#include <tom.h>
+
+#include <cstdlib>
+
 extern CLIPFORMAT cfEmbeddedObject;
 extern CLIPFORMAT cfRTO;
+extern CLIPFORMAT cfHTML;
 
 #ifdef _DEBUG
 #undef THIS_FILE
@@ -158,6 +163,10 @@ CWordPadView::CWordPadView()
 BOOL CWordPadView::PreCreateWindow(CREATESTRUCT& cs)
 {
 	BOOL bRes = CRichEditView::PreCreateWindow(cs);
+
+    if (bRes)
+        cs.lpszClass = MSFTEDIT_CLASS;
+
 	cs.style |= ES_SELECTIONBAR;
 	return bRes;
 }
@@ -647,25 +656,245 @@ HRESULT CWordPadView::GetClipboardData(CHARRANGE* lpchrg, DWORD /*reco*/,
 	return S_OK;
 }
 
-HRESULT CWordPadView::QueryAcceptData(LPDATAOBJECT lpdataobj,
-	CLIPFORMAT* lpcfFormat, DWORD reco, BOOL bReally,
-	HGLOBAL hMetaPict)
+
+
+
+
+
+static bool GetHtmlClipboardFragment(
+    COleDataObject& dataobj,
+    CLIPFORMAT cfHTML,
+    CStringW& html)
 {
-	if (bReally && *lpcfFormat == 0 && (m_nPasteType == 0))
-	{
-		COleDataObject dataobj;
-		dataobj.Attach(lpdataobj, FALSE);
-		if (!dataobj.IsDataAvailable(cfRTO)) // native avail, let richedit do as it wants
-		{
-			if (dataobj.IsDataAvailable(cfEmbeddedObject))
-			{
-				if (PasteNative(lpdataobj))
-					return S_FALSE;
-			}
-		}
-	}
-	return CRichEditView::QueryAcceptData(lpdataobj, lpcfFormat, reco, bReally,
-		hMetaPict);
+    if (!dataobj.IsDataAvailable(cfHTML))
+        return false;
+
+    //FORMATETC formatEtc = {};
+    //formatEtc.cfFormat = cfHTML;
+    //formatEtc.dwAspect = DVASPECT_CONTENT;
+    //formatEtc.tymed = TYMED_HGLOBAL;
+
+    STGMEDIUM medium = {};
+
+    if (!dataobj.GetData(cfHTML, &medium))//, &formatEtc))
+    {
+        return false;
+    }
+
+    // Process medium.hGlobal...
+
+    HGLOBAL hGlobal = medium.hGlobal;
+
+    if (hGlobal == nullptr)
+    {
+        ReleaseStgMedium(&medium);
+        return false;
+    }
+
+    const char* pData =
+        static_cast<const char*>(::GlobalLock(hGlobal));
+
+    if (pData == nullptr)
+    {
+        ReleaseStgMedium(&medium);
+        return false;
+    }
+
+    const SIZE_T size = ::GlobalSize(hGlobal);
+
+    CStringA data(pData, static_cast<int>(
+        min(size, INT_MAX)));
+
+    ::GlobalUnlock(hGlobal);
+    ReleaseStgMedium(&medium);
+
+    const auto findHeader = [&data](const char* name) -> int
+        {
+            CStringA key(name);
+            key.MakeLower();
+
+            CStringA lower(data);
+            lower.MakeLower();
+
+            return lower.Find(key);
+        };
+
+    auto getOffset = [&data, &findHeader](
+        const char* name, size_t& value) -> bool
+        {
+            const int pos = findHeader(name);
+
+            if (pos < 0)
+                return false;
+
+            const int colon = data.Find(':', pos);
+
+            if (colon < 0)
+                return false;
+
+            const int end = data.Find("\r\n", colon);
+
+            CStringA number =
+                data.Mid(colon + 1,
+                    (end >= 0 ? end : data.GetLength()) - colon - 1);
+
+            number.Trim();
+
+            char* pEnd = nullptr;
+
+            const unsigned long long v =
+                std::strtoull(number, &pEnd, 10);
+
+            if (pEnd == number.GetString())
+                return false;
+
+            value = static_cast<size_t>(v);
+            return true;
+        };
+
+    size_t start = 0;
+    size_t end = 0;
+
+    if (!getOffset("StartFragment", start) ||
+        !getOffset("EndFragment", end) ||
+        start > end ||
+        end > static_cast<size_t>(data.GetLength()))
+    {
+        return false;
+    }
+
+    const CStringA fragment =
+        data.Mid(
+            static_cast<int>(start),
+            static_cast<int>(end - start));
+
+    // CF_HTML is UTF-8.
+    int required = ::MultiByteToWideChar(
+        CP_UTF8,
+        0,
+        fragment,
+        fragment.GetLength(),
+        nullptr,
+        0);
+
+    if (required <= 0)
+        return false;
+
+    wchar_t* buffer = html.GetBuffer(required);
+
+    ::MultiByteToWideChar(
+        CP_UTF8,
+        0,
+        fragment,
+        fragment.GetLength(),
+        buffer,
+        required);
+
+    html.ReleaseBuffer(required);
+
+    return true;
+}
+
+
+
+
+
+
+static HRESULT PasteHtmlIntoRichEdit(
+    HWND hwndRichEdit,
+    const CStringW& html, CLIPFORMAT cfHTML)
+{
+    CComPtr<IRichEditOle> richEditOle;
+
+    if (!::SendMessage(
+        hwndRichEdit,
+        EM_GETOLEINTERFACE,
+        0,
+        reinterpret_cast<LPARAM>(
+            &richEditOle)))
+    {
+        return E_FAIL;
+    }
+
+    CComPtr<ITextDocument2> document;
+
+    HRESULT hr = richEditOle->QueryInterface(
+        __uuidof(ITextDocument2),
+        reinterpret_cast<void**>(&document));
+
+    if (FAILED(hr))
+        return hr;
+
+    CComPtr<ITextSelection> range;
+
+    hr = document->GetSelection(
+        &range);
+
+    if (FAILED(hr))
+        return hr;
+
+    CComVariant vt(html);
+
+    hr = range->Paste(&vt, cfHTML);
+    return hr;
+}
+
+
+
+
+
+HRESULT CWordPadView::QueryAcceptData(
+    LPDATAOBJECT lpdataobj,
+    CLIPFORMAT* lpcfFormat,
+    DWORD reco,
+    BOOL bReally,
+    HGLOBAL hMetaPict)
+{
+    ASSERT(lpcfFormat != nullptr);
+
+    if (!bReally)
+        return S_OK;
+
+    if (*lpcfFormat == 0 && m_nPasteType == 0)
+    {
+        COleDataObject dataobj;
+        dataobj.Attach(lpdataobj, FALSE);
+
+        if (dataobj.IsDataAvailable(cfHTML))
+        {
+            CStringW html;
+
+            if (GetHtmlClipboardFragment(
+                dataobj,
+                cfHTML,
+                html))
+            {
+                HRESULT hr =
+                    PasteHtmlIntoRichEdit(
+                        GetSafeHwnd(),
+                        html, cfHTML);
+
+                if (SUCCEEDED(hr))
+                    return S_FALSE;
+            }
+        }
+
+        if (!dataobj.IsDataAvailable(cfRTO))
+        {
+            if (dataobj.IsDataAvailable(cfEmbeddedObject))
+            {
+                if (PasteNative(lpdataobj))
+                    return S_FALSE;
+            }
+        }
+    }
+
+    return CRichEditView::QueryAcceptData(
+        lpdataobj,
+        lpcfFormat,
+        reco,
+        bReally,
+        hMetaPict);
 }
 
 BOOL CWordPadView::PasteNative(LPDATAOBJECT lpdataobj)
