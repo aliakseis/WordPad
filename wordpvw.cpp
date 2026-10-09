@@ -49,125 +49,256 @@ static char BASED_CODE THIS_FILE[] = __FILE__;
 
 namespace
 {
+
+#include <windows.h>
+#include <objidl.h>
+
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
+#include <string>
+#include <vector>
+
     static bool ReadHtmlClipboard(
         LPDATAOBJECT dataObject,
-        CLIPFORMAT htmlFormat,
+        CLIPFORMAT cfHTML,
         std::wstring& html)
     {
-        if (!dataObject || !htmlFormat)
+        html.clear();
+
+        if (!dataObject || cfHTML == 0)
             return false;
 
         FORMATETC format = {};
-        format.cfFormat = htmlFormat;
+        format.cfFormat = cfHTML;
         format.dwAspect = DVASPECT_CONTENT;
         format.lindex = -1;
         format.tymed = TYMED_HGLOBAL;
 
         STGMEDIUM medium = {};
 
-        HRESULT hr = dataObject->GetData(&format, &medium);
+        const HRESULT hr = dataObject->GetData(&format, &medium);
         if (FAILED(hr))
             return false;
 
-        bool result = false;
-
-        if (medium.tymed == TYMED_HGLOBAL && medium.hGlobal)
+        struct ReleaseMedium
         {
-            const SIZE_T size = ::GlobalSize(medium.hGlobal);
-            const char* bytes = static_cast<const char*>(
-                ::GlobalLock(medium.hGlobal));
+            STGMEDIUM* medium;
 
-            if (bytes && size)
+            ~ReleaseMedium()
             {
-                // CF_HTML offsets are byte offsets into the original
-                // clipboard payload, not character offsets.
-                const size_t length = strnlen_s(
-                    bytes, static_cast<size_t>(size));
+                ReleaseStgMedium(medium);
+            }
+        } release{ &medium };
 
-                const std::string data(bytes, length);
-                const std::string lower = [&data]()
-                    {
-                        std::string s(data);
-                        std::transform(
-                            s.begin(), s.end(), s.begin(),
-                            [](unsigned char c)
-                            {
-                                return static_cast<char>(tolower(c));
-                            });
-                        return s;
-                    }();
+        if (medium.tymed != TYMED_HGLOBAL || !medium.hGlobal)
+            return false;
 
-                auto offset = [&data, &lower](
-                    const char* field, size_t& value) -> bool
-                    {
-                        const std::string key = field;
-                        const size_t p = lower.find(key);
+        const SIZE_T globalSize = GlobalSize(medium.hGlobal);
+        if (globalSize == 0)
+            return false;
 
-                        if (p == std::string::npos)
-                            return false;
+        const auto* locked = static_cast<const char*>(
+            GlobalLock(medium.hGlobal));
 
-                        const size_t colon = data.find(':', p + key.size());
-                        if (colon == std::string::npos)
-                            return false;
+        if (!locked)
+            return false;
 
-                        size_t end = data.find_first_of("\r\n", colon + 1);
-                        if (end == std::string::npos)
-                            end = data.size();
+        struct UnlockGlobal
+        {
+            HGLOBAL handle;
 
-                        std::string number = data.substr(
-                            colon + 1, end - colon - 1);
+            ~UnlockGlobal()
+            {
+                GlobalUnlock(handle);
+            }
+        } unlock{ medium.hGlobal };
 
-                        const size_t first = number.find_first_not_of(" \t");
-                        if (first == std::string::npos)
-                            return false;
+        // Copy the payload while its HGLOBAL is locked. Do not assume
+        // the clipboard data is null-terminated.
+        std::vector<char> bytes(locked, locked + globalSize);
 
-                        char* tail = nullptr;
-                        const unsigned long long parsed =
-                            std::strtoull(number.c_str() + first, &tail, 10);
+        // CF_HTML is an ASCII header followed by UTF-8 HTML.
+        // Locate the end of the header before parsing its offset fields.
+        const size_t firstHtmlByte = [&bytes]() -> size_t
+            {
+                const auto it = std::find(bytes.begin(), bytes.end(), '<');
+                return static_cast<size_t>(it - bytes.begin());
+            }();
 
-                        if (tail == number.c_str() + first ||
-                            parsed > data.size())
-                            return false;
+        const size_t headerSize = firstHtmlByte;
 
-                        value = static_cast<size_t>(parsed);
-                        return true;
-                    };
+        auto parseOffset = [&bytes, headerSize](
+            const char* key,
+            size_t& value) -> bool
+            {
+                const size_t keyLength = std::strlen(key);
 
-                size_t start = 0;
-                size_t end = 0;
+                if (headerSize < keyLength)
+                    return false;
 
-                if (offset("StartFragment", start) &&
-                    offset("EndFragment", end) &&
-                    start <= end &&
-                    end <= data.size())
+                for (size_t i = 0; i + keyLength <= headerSize; ++i)
                 {
-                    const std::string fragment =
-                        data.substr(start, end - start);
+                    if (_strnicmp(bytes.data() + i, key, keyLength) != 0)
+                        continue;
 
-                    const int count = ::MultiByteToWideChar(
-                        CP_UTF8, MB_ERR_INVALID_CHARS,
-                        fragment.data(),
-                        static_cast<int>(fragment.size()),
-                        nullptr, 0);
+                    size_t p = i + keyLength;
 
-                    if (count > 0)
+                    while (p < headerSize &&
+                        (bytes[p] == ' ' || bytes[p] == '\t'))
                     {
-                        html.resize(static_cast<size_t>(count));
-
-                        result = ::MultiByteToWideChar(
-                            CP_UTF8, MB_ERR_INVALID_CHARS,
-                            fragment.data(),
-                            static_cast<int>(fragment.size()),
-                            &html[0], count) == count;
+                        ++p;
                     }
+
+                    if (p >= headerSize || bytes[p] != ':')
+                        continue;
+
+                    ++p;
+
+                    while (p < headerSize &&
+                        (bytes[p] == ' ' || bytes[p] == '\t'))
+                    {
+                        ++p;
+                    }
+
+                    if (p >= headerSize || bytes[p] < '0' || bytes[p] > '9')
+                        return false;
+
+                    size_t result = 0;
+
+                    while (p < headerSize &&
+                        bytes[p] >= '0' && bytes[p] <= '9')
+                    {
+                        const size_t digit =
+                            static_cast<size_t>(bytes[p] - '0');
+
+                        if (result > (SIZE_MAX - digit) / 10)
+                            return false;
+
+                        result = result * 10 + digit;
+                        ++p;
+                    }
+
+                    value = result;
+                    return true;
                 }
 
-                ::GlobalUnlock(medium.hGlobal);
-            }
+                return false;
+            };
+
+        size_t start = 0;
+        size_t end = 0;
+
+        bool validOffsets =
+            parseOffset("StartFragment", start) &&
+            parseOffset("EndFragment", end) &&
+            start < end &&
+            end <= bytes.size();
+
+        // Some clipboard producers supply placeholder offsets such as -1.
+        // Fall back to the standard HTML fragment comments in that case.
+        if (!validOffsets)
+        {
+            static constexpr char startMarker[] = "<!--StartFragment-->";
+            static constexpr char endMarker[] = "<!--EndFragment-->";
+
+            auto findMarker = [&bytes](
+                const char* marker,
+                size_t markerLength,
+                size_t from) -> size_t
+                {
+                    if (from > bytes.size() ||
+                        markerLength > bytes.size() - from)
+                    {
+                        return std::string::npos;
+                    }
+
+                    for (size_t i = from;
+                        i + markerLength <= bytes.size();
+                        ++i)
+                    {
+                        if (std::memcmp(
+                            bytes.data() + i, marker, markerLength) == 0)
+                        {
+                            return i;
+                        }
+                    }
+
+                    return std::string::npos;
+                };
+
+            const size_t markerStart = findMarker(
+                startMarker, sizeof(startMarker) - 1, 0);
+
+            if (markerStart == std::string::npos)
+                return false;
+
+            start = markerStart + sizeof(startMarker) - 1;
+
+            const size_t markerEnd = findMarker(
+                endMarker, sizeof(endMarker) - 1, start);
+
+            if (markerEnd == std::string::npos || markerEnd <= start)
+                return false;
+
+            end = markerEnd;
         }
 
-        ::ReleaseStgMedium(&medium);
-        return result;
+        const size_t length = end - start;
+
+        if (length == 0 ||
+            length > static_cast<size_t>(INT_MAX))
+        {
+            return false;
+        }
+
+        // CF_HTML offsets are byte offsets. Decode UTF-8 only after
+        // selecting the fragment.
+        const char* utf8 = bytes.data() + start;
+
+        int wideLength = MultiByteToWideChar(
+            CP_UTF8,
+            MB_ERR_INVALID_CHARS,
+            utf8,
+            static_cast<int>(length),
+            nullptr,
+            0);
+
+        if (wideLength == 0)
+        {
+            // Some applications provide malformed UTF-8. Retry with
+            // replacement characters rather than rejecting all content.
+            wideLength = MultiByteToWideChar(
+                CP_UTF8,
+                0,
+                utf8,
+                static_cast<int>(length),
+                nullptr,
+                0);
+        }
+
+        if (wideLength <= 0)
+            return false;
+
+        std::wstring result(static_cast<size_t>(wideLength), L'\0');
+
+        if (MultiByteToWideChar(
+            CP_UTF8,
+            0,
+            utf8,
+            static_cast<int>(length),
+            &result[0],
+            wideLength) != wideLength)
+        {
+            html.clear();
+            return false;
+        }
+
+        if (!result.empty() && result.front() == L'\uFEFF')
+            result.erase(result.begin());
+
+        html = std::move(result);
+        return !html.empty();
     }
 
     static void AppendRtfText(
@@ -327,6 +458,137 @@ namespace
         return {};
     }
 
+
+
+    static bool DecodeBase64(
+        const std::wstring& input,
+        std::vector<unsigned char>& output)
+    {
+        static const char alphabet[] =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+        int val = 0;
+        int bits = -8;
+
+        output.clear();
+
+        for (wchar_t ch : input)
+        {
+            if (ch == L'=')
+                break;
+
+            if (iswspace(ch))
+                continue;
+
+            if (ch > 127)
+                return false;
+
+            const char* p = strchr(alphabet, static_cast<char>(ch));
+            if (!p)
+                return false;
+
+            val = (val << 6) | static_cast<int>(p - alphabet);
+            bits += 6;
+
+            if (bits >= 0)
+            {
+                output.push_back(
+                    static_cast<unsigned char>((val >> bits) & 0xFF));
+                bits -= 8;
+
+                // Defend against unexpectedly large clipboard payloads.
+                if (output.size() > 16 * 1024 * 1024)
+                    return false;
+            }
+        }
+
+        return !output.empty();
+    }
+
+    static bool AppendRtfImage(
+        std::string& rtf,
+        const std::wstring& tag)
+    {
+        const std::wstring src = GetHtmlAttribute(tag, L"src");
+        const std::wstring lowerSrc = LowerHtml(src);
+
+        const bool isPng =
+            lowerSrc.find(L"data:image/png;base64,") == 0;
+        const bool isJpeg =
+            lowerSrc.find(L"data:image/jpeg;base64,") == 0 ||
+            lowerSrc.find(L"data:image/jpg;base64,") == 0;
+
+        // Only embedded raster data is handled here. Arbitrary URLs are
+        // intentionally not downloaded during a clipboard paste.
+        if (!isPng && !isJpeg)
+            return false;
+
+        const size_t comma = src.find(L',');
+        if (comma == std::wstring::npos)
+            return false;
+
+        std::vector<unsigned char> bytes;
+        if (!DecodeBase64(src.substr(comma + 1), bytes))
+            return false;
+
+        // Validate the file signature before placing data into the RTF.
+        if (isPng)
+        {
+            static const unsigned char signature[] =
+            { 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A };
+
+            if (bytes.size() < sizeof(signature) ||
+                memcmp(bytes.data(), signature, sizeof(signature)) != 0)
+                return false;
+        }
+        else
+        {
+            if (bytes.size() < 3 ||
+                bytes[0] != 0xFF ||
+                bytes[1] != 0xD8 ||
+                bytes[2] != 0xFF)
+                return false;
+        }
+
+        // RTF picture dimensions are expressed in twips.
+        // Use conservative default dimensions; Rich Edit can scale the
+        // picture to fit the available line width.
+        int widthTwips = 3600;
+        int heightTwips = 2400;
+
+        auto parseDimension = [](const std::wstring& value, int& twips)
+            {
+                if (value.empty())
+                    return;
+
+                wchar_t* end = nullptr;
+                const long pixels = wcstol(value.c_str(), &end, 10);
+
+                if (end != value.c_str() && pixels > 0 && pixels <= 4000)
+                    twips = static_cast<int>(pixels * 15);
+            };
+
+        parseDimension(GetHtmlAttribute(tag, L"width"), widthTwips);
+        parseDimension(GetHtmlAttribute(tag, L"height"), heightTwips);
+
+        rtf += "{\\pict";
+        rtf += isPng ? "\\pngblip" : "\\jpegblip";
+        rtf += "\\picwgoal" + std::to_string(widthTwips);
+        rtf += "\\pichgoal" + std::to_string(heightTwips);
+        rtf += "\n";
+
+        static const char hex[] = "0123456789abcdef";
+
+        for (unsigned char byte : bytes)
+        {
+            rtf.push_back(hex[byte >> 4]);
+            rtf.push_back(hex[byte & 15]);
+        }
+
+        rtf += "}\n";
+        return true;
+    }
+
     static std::string HtmlToRtf(const std::wstring& html)
     {
         std::string rtf =
@@ -438,7 +700,21 @@ namespace
                 continue;
             }
 
-            if (name == L"br" && !closing)
+
+            if (name == L"img" && !closing)
+            {
+                if (!AppendRtfImage(rtf, tag))
+                {
+                    // Unsupported or unavailable image: retain its alternative
+                    // text rather than silently losing all indication of it.
+                    const std::wstring alt = GetHtmlAttribute(tag, L"alt");
+                    if (!alt.empty())
+                        AppendRtfText(rtf, alt);
+                }
+
+                paragraphStarted = true;
+            }
+            else if (name == L"br" && !closing)
             {
                 rtf += "\\line ";
                 paragraphStarted = true;
