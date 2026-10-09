@@ -30,6 +30,12 @@
 
 #include <cstdlib>
 
+#include <string>
+#include <vector>
+#include <algorithm>
+#include <cstdint>
+#include <climits>
+
 extern CLIPFORMAT cfEmbeddedObject;
 extern CLIPFORMAT cfRTO;
 extern CLIPFORMAT cfHTML;
@@ -38,6 +44,628 @@ extern CLIPFORMAT cfHTML;
 #undef THIS_FILE
 static char BASED_CODE THIS_FILE[] = __FILE__;
 #endif
+
+
+
+namespace
+{
+    static bool ReadHtmlClipboard(
+        LPDATAOBJECT dataObject,
+        CLIPFORMAT htmlFormat,
+        std::wstring& html)
+    {
+        if (!dataObject || !htmlFormat)
+            return false;
+
+        FORMATETC format = {};
+        format.cfFormat = htmlFormat;
+        format.dwAspect = DVASPECT_CONTENT;
+        format.lindex = -1;
+        format.tymed = TYMED_HGLOBAL;
+
+        STGMEDIUM medium = {};
+
+        HRESULT hr = dataObject->GetData(&format, &medium);
+        if (FAILED(hr))
+            return false;
+
+        bool result = false;
+
+        if (medium.tymed == TYMED_HGLOBAL && medium.hGlobal)
+        {
+            const SIZE_T size = ::GlobalSize(medium.hGlobal);
+            const char* bytes = static_cast<const char*>(
+                ::GlobalLock(medium.hGlobal));
+
+            if (bytes && size)
+            {
+                // CF_HTML offsets are byte offsets into the original
+                // clipboard payload, not character offsets.
+                const size_t length = strnlen_s(
+                    bytes, static_cast<size_t>(size));
+
+                const std::string data(bytes, length);
+                const std::string lower = [&data]()
+                    {
+                        std::string s(data);
+                        std::transform(
+                            s.begin(), s.end(), s.begin(),
+                            [](unsigned char c)
+                            {
+                                return static_cast<char>(tolower(c));
+                            });
+                        return s;
+                    }();
+
+                auto offset = [&data, &lower](
+                    const char* field, size_t& value) -> bool
+                    {
+                        const std::string key = field;
+                        const size_t p = lower.find(key);
+
+                        if (p == std::string::npos)
+                            return false;
+
+                        const size_t colon = data.find(':', p + key.size());
+                        if (colon == std::string::npos)
+                            return false;
+
+                        size_t end = data.find_first_of("\r\n", colon + 1);
+                        if (end == std::string::npos)
+                            end = data.size();
+
+                        std::string number = data.substr(
+                            colon + 1, end - colon - 1);
+
+                        const size_t first = number.find_first_not_of(" \t");
+                        if (first == std::string::npos)
+                            return false;
+
+                        char* tail = nullptr;
+                        const unsigned long long parsed =
+                            std::strtoull(number.c_str() + first, &tail, 10);
+
+                        if (tail == number.c_str() + first ||
+                            parsed > data.size())
+                            return false;
+
+                        value = static_cast<size_t>(parsed);
+                        return true;
+                    };
+
+                size_t start = 0;
+                size_t end = 0;
+
+                if (offset("StartFragment", start) &&
+                    offset("EndFragment", end) &&
+                    start <= end &&
+                    end <= data.size())
+                {
+                    const std::string fragment =
+                        data.substr(start, end - start);
+
+                    const int count = ::MultiByteToWideChar(
+                        CP_UTF8, MB_ERR_INVALID_CHARS,
+                        fragment.data(),
+                        static_cast<int>(fragment.size()),
+                        nullptr, 0);
+
+                    if (count > 0)
+                    {
+                        html.resize(static_cast<size_t>(count));
+
+                        result = ::MultiByteToWideChar(
+                            CP_UTF8, MB_ERR_INVALID_CHARS,
+                            fragment.data(),
+                            static_cast<int>(fragment.size()),
+                            &html[0], count) == count;
+                    }
+                }
+
+                ::GlobalUnlock(medium.hGlobal);
+            }
+        }
+
+        ::ReleaseStgMedium(&medium);
+        return result;
+    }
+
+    static void AppendRtfText(
+        std::string& rtf,
+        const std::wstring& text)
+    {
+        for (wchar_t ch : text)
+        {
+            switch (ch)
+            {
+            case L'\\': rtf += "\\\\"; break;
+            case L'{':  rtf += "\\{";  break;
+            case L'}':  rtf += "\\}";  break;
+            case L'\r': break;
+            case L'\n': rtf += "\\line "; break;
+            case L'\t': rtf += "\\tab "; break;
+            default:
+                if (ch >= 0x20 && ch < 0x7f)
+                {
+                    rtf.push_back(static_cast<char>(ch));
+                }
+                else
+                {
+                    // RTF Unicode escapes use signed 16-bit values.
+                    rtf += "\\u";
+                    rtf += std::to_string(
+                        static_cast<short>(ch));
+                    rtf += "?";
+                }
+                break;
+            }
+        }
+    }
+
+    static std::wstring DecodeHtmlEntities(const std::wstring& text)
+    {
+        std::wstring result;
+        result.reserve(text.size());
+
+        for (size_t i = 0; i < text.size(); )
+        {
+            if (text[i] != L'&')
+            {
+                result.push_back(text[i++]);
+                continue;
+            }
+
+            const size_t semicolon = text.find(L';', i + 1);
+
+            if (semicolon == std::wstring::npos ||
+                semicolon - i > 12)
+            {
+                result.push_back(text[i++]);
+                continue;
+            }
+
+            const std::wstring entity =
+                text.substr(i + 1, semicolon - i - 1);
+
+            wchar_t decoded = 0;
+
+            if (entity == L"amp") decoded = L'&';
+            else if (entity == L"lt") decoded = L'<';
+            else if (entity == L"gt") decoded = L'>';
+            else if (entity == L"quot") decoded = L'"';
+            else if (entity == L"apos" || entity == L"#39")
+                decoded = L'\'';
+            else if (entity == L"nbsp") decoded = L' ';
+            else if (entity.size() > 1 && entity[0] == L'#')
+            {
+                wchar_t* tail = nullptr;
+                const bool hex = entity.size() > 2 &&
+                    (entity[1] == L'x' || entity[1] == L'X');
+
+                const unsigned long value = wcstoul(
+                    entity.c_str() + (hex ? 2 : 1),
+                    &tail, hex ? 16 : 10);
+
+                if (tail && *tail == 0 &&
+                    value > 0 && value <= 0xFFFF &&
+                    !(value >= 0xD800 && value <= 0xDFFF))
+                {
+                    decoded = static_cast<wchar_t>(value);
+                }
+            }
+
+            if (decoded)
+            {
+                result.push_back(decoded);
+                i = semicolon + 1;
+            }
+            else
+            {
+                result.append(text, i, semicolon - i + 1);
+                i = semicolon + 1;
+            }
+        }
+
+        return result;
+    }
+
+    static std::wstring LowerHtml(std::wstring value)
+    {
+        std::transform(
+            value.begin(), value.end(), value.begin(),
+            [](wchar_t c)
+            {
+                return static_cast<wchar_t>(towlower(c));
+            });
+        return value;
+    }
+
+    static std::wstring GetHtmlAttribute(
+        const std::wstring& tag,
+        const std::wstring& attribute)
+    {
+        const std::wstring lower = LowerHtml(tag);
+        const std::wstring key = LowerHtml(attribute);
+        size_t p = 0;
+
+        while ((p = lower.find(key, p)) != std::wstring::npos)
+        {
+            const bool leftBoundary =
+                p == 0 || iswspace(lower[p - 1]) ||
+                lower[p - 1] == L'<';
+
+            size_t q = p + key.size();
+
+            while (q < lower.size() && iswspace(lower[q]))
+                ++q;
+
+            if (!leftBoundary || q >= lower.size() ||
+                lower[q] != L'=')
+            {
+                p += key.size();
+                continue;
+            }
+
+            ++q;
+            while (q < tag.size() && iswspace(tag[q]))
+                ++q;
+
+            if (q >= tag.size())
+                return {};
+
+            const wchar_t quote =
+                (tag[q] == L'\'' || tag[q] == L'"') ? tag[q++] : 0;
+
+            const size_t end = quote
+                ? tag.find(quote, q)
+                : tag.find_first_of(L" \t\r\n>", q);
+
+            return tag.substr(
+                q, (end == std::wstring::npos ? tag.size() : end) - q);
+        }
+
+        return {};
+    }
+
+    static std::string HtmlToRtf(const std::wstring& html)
+    {
+        std::string rtf =
+            "{\\rtf1\\ansi\\deff0"
+            "{\\fonttbl{\\f0\\fnil Segoe UI;}}"
+            "\\viewkind4\\uc1 ";
+
+        bool bold = false;
+        bool italic = false;
+        bool underline = false;
+        bool inPre = false;
+        bool paragraphStarted = false;
+        int listDepth = 0;
+
+        auto paragraph = [&]()
+            {
+                if (paragraphStarted)
+                    rtf += "\\par\n";
+
+                paragraphStarted = true;
+            };
+
+        size_t i = 0;
+
+        while (i < html.size())
+        {
+            if (html[i] != L'<')
+            {
+                size_t end = html.find(L'<', i);
+                if (end == std::wstring::npos)
+                    end = html.size();
+
+                std::wstring text = DecodeHtmlEntities(
+                    html.substr(i, end - i));
+
+                if (!inPre)
+                {
+                    std::wstring collapsed;
+                    bool previousSpace = false;
+
+                    for (wchar_t ch : text)
+                    {
+                        if (iswspace(ch))
+                        {
+                            if (!previousSpace)
+                                collapsed.push_back(L' ');
+                            previousSpace = true;
+                        }
+                        else
+                        {
+                            collapsed.push_back(ch);
+                            previousSpace = false;
+                        }
+                    }
+
+                    text.swap(collapsed);
+                }
+
+                AppendRtfText(rtf, text);
+                i = end;
+                continue;
+            }
+
+            const size_t end = html.find(L'>', i + 1);
+            if (end == std::wstring::npos)
+            {
+                AppendRtfText(rtf, html.substr(i));
+                break;
+            }
+
+            std::wstring tag = html.substr(i + 1, end - i - 1);
+            const std::wstring lower = LowerHtml(tag);
+
+            i = end + 1;
+
+            if (lower.empty() || lower[0] == L'!' ||
+                lower[0] == L'?')
+                continue;
+
+            const bool closing = lower[0] == L'/';
+            size_t nameStart = closing ? 1 : 0;
+            size_t nameEnd = nameStart;
+
+            while (nameEnd < lower.size() &&
+                (iswalnum(lower[nameEnd]) || lower[nameEnd] == L'-'))
+                ++nameEnd;
+
+            const std::wstring name =
+                lower.substr(nameStart, nameEnd - nameStart);
+
+            if (name == L"script" || name == L"style")
+            {
+                if (!closing)
+                {
+                    const std::wstring closeTag = L"</" + name;
+                    const std::wstring remaining =
+                        LowerHtml(html.substr(i));
+                    const size_t p = remaining.find(closeTag);
+
+                    if (p != std::wstring::npos)
+                    {
+                        const size_t closeEnd =
+                            html.find(L'>', i + p);
+
+                        i = closeEnd == std::wstring::npos
+                            ? html.size() : closeEnd + 1;
+                    }
+                }
+                continue;
+            }
+
+            if (name == L"br" && !closing)
+            {
+                rtf += "\\line ";
+                paragraphStarted = true;
+            }
+            else if (name == L"p" || name == L"div" ||
+                name == L"h1" || name == L"h2" ||
+                name == L"h3" || name == L"h4" ||
+                name == L"li" || name == L"blockquote")
+            {
+                paragraph();
+
+                if (name == L"li" && !closing)
+                {
+                    if (listDepth > 0)
+                        rtf += "\\tab ";
+                    rtf += "\\bullet\\tab ";
+                }
+
+                if (name == L"h1") rtf += "\\fs36\\b ";
+                else if (name == L"h2") rtf += "\\fs30\\b ";
+                else if (name == L"h3") rtf += "\\fs26\\b ";
+                else if (name == L"h4") rtf += "\\fs24\\b ";
+            }
+            else if (name == L"ul" || name == L"ol")
+            {
+                if (!closing)
+                    ++listDepth;
+                else if (listDepth > 0)
+                    --listDepth;
+            }
+            else if (name == L"b" || name == L"strong")
+            {
+                bold = !closing;
+                rtf += bold ? "\\b " : "\\b0 ";
+            }
+            else if (name == L"i" || name == L"em")
+            {
+                italic = !closing;
+                rtf += italic ? "\\i " : "\\i0 ";
+            }
+            else if (name == L"u")
+            {
+                underline = !closing;
+                rtf += underline ? "\\ul " : "\\ul0 ";
+            }
+            else if (name == L"s" || name == L"strike" ||
+                name == L"del")
+            {
+                rtf += closing ? "\\strike0 " : "\\strike ";
+            }
+            else if (name == L"pre")
+            {
+                inPre = !closing;
+                rtf += closing
+                    ? "\\f0\\fs20 "
+                    : "\\f0\\fs20 ";
+            }
+            else if (name == L"sub")
+            {
+                rtf += closing ? "\\sub0 " : "\\sub ";
+            }
+            else if (name == L"sup")
+            {
+                rtf += closing ? "\\super0 " : "\\super ";
+            }
+            else if (name == L"font" || name == L"span")
+            {
+                const std::wstring style =
+                    LowerHtml(GetHtmlAttribute(tag, L"style"));
+
+                const size_t sizePos = style.find(L"font-size:");
+                if (sizePos != std::wstring::npos)
+                {
+                    const wchar_t* value =
+                        style.c_str() + sizePos + 10;
+
+                    while (iswspace(*value))
+                        ++value;
+
+                    wchar_t* tail = nullptr;
+                    const double points = wcstod(value, &tail);
+
+                    if (tail != value && points >= 4 && points <= 72)
+                    {
+                        const int halfPoints =
+                            static_cast<int>(points * 2 + 0.5);
+
+                        rtf += "\\fs" + std::to_string(halfPoints) + " ";
+                    }
+                }
+
+                const size_t weightPos = style.find(L"font-weight:");
+                if (weightPos != std::wstring::npos)
+                {
+                    const std::wstring weight =
+                        style.substr(weightPos + 12, 12);
+
+                    if (weight.find(L"bold") != std::wstring::npos ||
+                        weight.find(L"600") != std::wstring::npos ||
+                        weight.find(L"700") != std::wstring::npos ||
+                        weight.find(L"800") != std::wstring::npos ||
+                        weight.find(L"900") != std::wstring::npos)
+                    {
+                        bold = !closing;
+                        rtf += bold ? "\\b " : "\\b0 ";
+                    }
+                }
+
+                const size_t italicPos = style.find(L"font-style:");
+                if (italicPos != std::wstring::npos)
+                {
+                    italic = !closing;
+                    rtf += italic ? "\\i " : "\\i0 ";
+                }
+
+                const size_t decorationPos =
+                    style.find(L"text-decoration:");
+
+                if (decorationPos != std::wstring::npos)
+                {
+                    underline = !closing;
+                    rtf += underline ? "\\ul " : "\\ul0 ";
+                }
+            }
+            else if (name == L"a")
+            {
+                // Preserve hyperlink text and underline it.
+                underline = !closing;
+                rtf += underline ? "\\ul " : "\\ul0 ";
+            }
+        }
+
+        // Silence compiler warnings for state retained for tag processing.
+        (void)bold;
+        (void)italic;
+        (void)underline;
+
+        rtf += "}";
+        return rtf;
+    }
+
+
+    struct HtmlRtfStream
+    {
+        const std::string* data = nullptr;
+        size_t position = 0;
+    };
+
+    static DWORD CALLBACK HtmlRtfStreamCallback(
+        DWORD_PTR cookie,
+        LPBYTE buffer,
+        LONG bytes,
+        LONG* bytesWritten)
+    {
+        if (!cookie || !buffer || !bytesWritten || bytes < 0)
+            return 1;
+
+        HtmlRtfStream* stream =
+            reinterpret_cast<HtmlRtfStream*>(cookie);
+
+        if (!stream->data)
+            return 1;
+
+        const size_t remaining =
+            stream->position < stream->data->size()
+            ? stream->data->size() - stream->position
+            : 0;
+
+        const size_t count = (std::min)(
+            remaining, static_cast<size_t>(bytes));
+
+        if (count != 0)
+        {
+            memcpy(
+                buffer,
+                stream->data->data() + stream->position,
+                count);
+        }
+
+        stream->position += count;
+        *bytesWritten = static_cast<LONG>(count);
+        return 0;
+    }
+
+    static HRESULT PasteHtmlIntoRichEdit(
+        HWND hwndRichEdit,
+        LPDATAOBJECT dataObject,
+        CLIPFORMAT htmlFormat)
+    {
+        if (!::IsWindow(hwndRichEdit) || !dataObject || !htmlFormat)
+            return E_INVALIDARG;
+
+        std::wstring html;
+
+        if (!ReadHtmlClipboard(dataObject, htmlFormat, html))
+            return DV_E_FORMATETC;
+
+        const std::string rtf = HtmlToRtf(html);
+
+        if (rtf.empty())
+            return E_FAIL;
+
+        HtmlRtfStream stream;
+        stream.data = &rtf;
+
+        EDITSTREAM editStream = {};
+        editStream.dwCookie =
+            reinterpret_cast<DWORD_PTR>(&stream);
+        editStream.pfnCallback = HtmlRtfStreamCallback;
+
+        // SFF_SELECTION replaces the selected text rather than the document.
+        const LRESULT inserted = ::SendMessage(
+            hwndRichEdit,
+            EM_STREAMIN,
+            SF_RTF | SFF_SELECTION,
+            reinterpret_cast<LPARAM>(&editStream));
+
+        if (editStream.dwError != 0)
+            return HRESULT_FROM_WIN32(editStream.dwError);
+
+        if (inserted == 0 && !rtf.empty())
+            return E_FAIL;
+
+        return S_OK;
+    }
+}
+
 
 BOOL CCharFormat::operator==(CCharFormat& cf)
 {
@@ -658,191 +1286,6 @@ HRESULT CWordPadView::GetClipboardData(CHARRANGE* lpchrg, DWORD /*reco*/,
 
 
 
-
-
-
-static bool GetHtmlClipboardFragment(
-    COleDataObject& dataobj,
-    CLIPFORMAT cfHTML,
-    CStringW& html)
-{
-    if (!dataobj.IsDataAvailable(cfHTML))
-        return false;
-
-    //FORMATETC formatEtc = {};
-    //formatEtc.cfFormat = cfHTML;
-    //formatEtc.dwAspect = DVASPECT_CONTENT;
-    //formatEtc.tymed = TYMED_HGLOBAL;
-
-    STGMEDIUM medium = {};
-
-    if (!dataobj.GetData(cfHTML, &medium))//, &formatEtc))
-    {
-        return false;
-    }
-
-    // Process medium.hGlobal...
-
-    HGLOBAL hGlobal = medium.hGlobal;
-
-    if (hGlobal == nullptr)
-    {
-        ReleaseStgMedium(&medium);
-        return false;
-    }
-
-    const char* pData =
-        static_cast<const char*>(::GlobalLock(hGlobal));
-
-    if (pData == nullptr)
-    {
-        ReleaseStgMedium(&medium);
-        return false;
-    }
-
-    const SIZE_T size = ::GlobalSize(hGlobal);
-
-    CStringA data(pData, static_cast<int>(
-        min(size, INT_MAX)));
-
-    ::GlobalUnlock(hGlobal);
-    ReleaseStgMedium(&medium);
-
-    const auto findHeader = [&data](const char* name) -> int
-        {
-            CStringA key(name);
-            key.MakeLower();
-
-            CStringA lower(data);
-            lower.MakeLower();
-
-            return lower.Find(key);
-        };
-
-    auto getOffset = [&data, &findHeader](
-        const char* name, size_t& value) -> bool
-        {
-            const int pos = findHeader(name);
-
-            if (pos < 0)
-                return false;
-
-            const int colon = data.Find(':', pos);
-
-            if (colon < 0)
-                return false;
-
-            const int end = data.Find("\r\n", colon);
-
-            CStringA number =
-                data.Mid(colon + 1,
-                    (end >= 0 ? end : data.GetLength()) - colon - 1);
-
-            number.Trim();
-
-            char* pEnd = nullptr;
-
-            const unsigned long long v =
-                std::strtoull(number, &pEnd, 10);
-
-            if (pEnd == number.GetString())
-                return false;
-
-            value = static_cast<size_t>(v);
-            return true;
-        };
-
-    size_t start = 0;
-    size_t end = 0;
-
-    if (!getOffset("StartFragment", start) ||
-        !getOffset("EndFragment", end) ||
-        start > end ||
-        end > static_cast<size_t>(data.GetLength()))
-    {
-        return false;
-    }
-
-    const CStringA fragment =
-        data.Mid(
-            static_cast<int>(start),
-            static_cast<int>(end - start));
-
-    // CF_HTML is UTF-8.
-    int required = ::MultiByteToWideChar(
-        CP_UTF8,
-        0,
-        fragment,
-        fragment.GetLength(),
-        nullptr,
-        0);
-
-    if (required <= 0)
-        return false;
-
-    wchar_t* buffer = html.GetBuffer(required);
-
-    ::MultiByteToWideChar(
-        CP_UTF8,
-        0,
-        fragment,
-        fragment.GetLength(),
-        buffer,
-        required);
-
-    html.ReleaseBuffer(required);
-
-    return true;
-}
-
-
-
-
-
-
-static HRESULT PasteHtmlIntoRichEdit(
-    HWND hwndRichEdit,
-    const CStringW& html, CLIPFORMAT cfHTML)
-{
-    CComPtr<IRichEditOle> richEditOle;
-
-    if (!::SendMessage(
-        hwndRichEdit,
-        EM_GETOLEINTERFACE,
-        0,
-        reinterpret_cast<LPARAM>(
-            &richEditOle)))
-    {
-        return E_FAIL;
-    }
-
-    CComPtr<ITextDocument2> document;
-
-    HRESULT hr = richEditOle->QueryInterface(
-        __uuidof(ITextDocument2),
-        reinterpret_cast<void**>(&document));
-
-    if (FAILED(hr))
-        return hr;
-
-    CComPtr<ITextSelection> range;
-
-    hr = document->GetSelection(
-        &range);
-
-    if (FAILED(hr))
-        return hr;
-
-    CComVariant vt(html);
-
-    hr = range->Paste(&vt, cfHTML);
-    return hr;
-}
-
-
-
-
-
 HRESULT CWordPadView::QueryAcceptData(
     LPDATAOBJECT lpdataobj,
     CLIPFORMAT* lpcfFormat,
@@ -850,42 +1293,36 @@ HRESULT CWordPadView::QueryAcceptData(
     BOOL bReally,
     HGLOBAL hMetaPict)
 {
-    ASSERT(lpcfFormat != nullptr);
+    if (!lpcfFormat)
+        return E_INVALIDARG;
 
-    if (!bReally)
-        return S_OK;
-
-    if (*lpcfFormat == 0 && m_nPasteType == 0)
+    if (lpdataobj &&
+        bReally &&
+        *lpcfFormat == 0 &&
+        m_nPasteType == 0)
     {
         COleDataObject dataobj;
         dataobj.Attach(lpdataobj, FALSE);
 
-        if (dataobj.IsDataAvailable(cfHTML))
+        // Prefer HTML when available. If conversion fails, continue
+        // through the existing RTF/native-object/base-class handling.
+        if (cfHTML != 0 && dataobj.IsDataAvailable(cfHTML))
         {
-            CStringW html;
+            const HRESULT hr = PasteHtmlIntoRichEdit(
+                GetSafeHwnd(),
+                lpdataobj,
+                cfHTML);
 
-            if (GetHtmlClipboardFragment(
-                dataobj,
-                cfHTML,
-                html))
-            {
-                HRESULT hr =
-                    PasteHtmlIntoRichEdit(
-                        GetSafeHwnd(),
-                        html, cfHTML);
-
-                if (SUCCEEDED(hr))
-                    return S_FALSE;
-            }
+            if (SUCCEEDED(hr))
+                return S_FALSE;
         }
 
-        if (!dataobj.IsDataAvailable(cfRTO))
+        // Retain the application's existing embedded-object handling.
+        if (!dataobj.IsDataAvailable(cfRTO) &&
+            dataobj.IsDataAvailable(cfEmbeddedObject))
         {
-            if (dataobj.IsDataAvailable(cfEmbeddedObject))
-            {
-                if (PasteNative(lpdataobj))
-                    return S_FALSE;
-            }
+            if (PasteNative(lpdataobj))
+                return S_FALSE;
         }
     }
 
