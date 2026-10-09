@@ -36,6 +36,25 @@
 #include <cstdint>
 #include <climits>
 
+
+
+#include <windows.h>
+#include <objidl.h>
+
+#include <cstring>
+
+
+#include <winhttp.h>
+#include <wincodec.h>
+#include <wrl/client.h>
+
+#include <limits>
+
+#pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "windowscodecs.lib")
+#pragma comment(lib, "ole32.lib")
+
+
 extern CLIPFORMAT cfEmbeddedObject;
 extern CLIPFORMAT cfRTO;
 extern CLIPFORMAT cfHTML;
@@ -46,18 +65,181 @@ static char BASED_CODE THIS_FILE[] = __FILE__;
 #endif
 
 
-
 namespace
 {
 
-#include <windows.h>
-#include <objidl.h>
+    static bool DownloadHttpsImage(
+        const std::wstring& url,
+        std::vector<BYTE>& data)
+    {
+        constexpr DWORD MaxImageBytes = 16u * 1024u * 1024u;
 
-#include <algorithm>
-#include <cstdint>
-#include <cstring>
-#include <string>
-#include <vector>
+        data.clear();
+
+        URL_COMPONENTS parts = {};
+        parts.dwStructSize = sizeof(parts);
+        parts.dwSchemeLength = DWORD(-1);
+        parts.dwHostNameLength = DWORD(-1);
+        parts.dwUrlPathLength = DWORD(-1);
+        parts.dwExtraInfoLength = DWORD(-1);
+
+        if (!WinHttpCrackUrl(url.c_str(), 0, 0, &parts))
+            return false;
+
+        if (parts.nScheme != INTERNET_SCHEME_HTTPS ||
+            parts.dwHostNameLength == 0)
+        {
+            return false;
+        }
+
+        const std::wstring host(
+            parts.lpszHostName, parts.dwHostNameLength);
+
+        std::wstring path(parts.lpszUrlPath, parts.dwUrlPathLength);
+
+        if (parts.dwExtraInfoLength)
+            path.append(parts.lpszExtraInfo, parts.dwExtraInfoLength);
+
+        if (path.empty())
+            path = L"/";
+
+        HINTERNET session = WinHttpOpen(
+            L"RichEditor/1.0",
+            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+            WINHTTP_NO_PROXY_NAME,
+            WINHTTP_NO_PROXY_BYPASS,
+            0);
+
+        if (!session)
+            return false;
+
+        WinHttpSetTimeouts(session, 5000, 5000, 10000, 10000);
+
+        // Do not follow redirects automatically: a redirect could point
+        // to an HTTP URL or an unintended internal destination.
+        DWORD redirectPolicy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+        WinHttpSetOption(
+            session,
+            WINHTTP_OPTION_REDIRECT_POLICY,
+            &redirectPolicy,
+            sizeof(redirectPolicy));
+
+        HINTERNET connection = WinHttpConnect(
+            session, host.c_str(), parts.nPort, 0);
+
+        HINTERNET request = connection
+            ? WinHttpOpenRequest(
+                connection,
+                L"GET",
+                path.c_str(),
+                nullptr,
+                WINHTTP_NO_REFERER,
+                WINHTTP_DEFAULT_ACCEPT_TYPES,
+                WINHTTP_FLAG_SECURE)
+            : nullptr;
+
+        bool ok = false;
+
+        if (request &&
+            WinHttpSendRequest(
+                request,
+                WINHTTP_NO_ADDITIONAL_HEADERS,
+                0,
+                WINHTTP_NO_REQUEST_DATA,
+                0,
+                0,
+                0) &&
+            WinHttpReceiveResponse(request, nullptr))
+        {
+            DWORD status = 0;
+            DWORD statusSize = sizeof(status);
+
+            if (WinHttpQueryHeaders(
+                request,
+                WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                WINHTTP_HEADER_NAME_BY_INDEX,
+                &status,
+                &statusSize,
+                WINHTTP_NO_HEADER_INDEX) &&
+                status == HTTP_STATUS_OK)
+            {
+                DWORD contentLength = 0;
+                DWORD lengthSize = sizeof(contentLength);
+
+                if (WinHttpQueryHeaders(
+                    request,
+                    WINHTTP_QUERY_CONTENT_LENGTH |
+                    WINHTTP_QUERY_FLAG_NUMBER,
+                    WINHTTP_HEADER_NAME_BY_INDEX,
+                    &contentLength,
+                    &lengthSize,
+                    WINHTTP_NO_HEADER_INDEX) &&
+                    contentLength > MaxImageBytes)
+                {
+                    // Reject oversized responses before downloading them.
+                }
+                else
+                {
+                    ok = true;
+
+                    for (;;)
+                    {
+                        DWORD available = 0;
+
+                        if (!WinHttpQueryDataAvailable(request, &available))
+                        {
+                            ok = false;
+                            break;
+                        }
+
+                        if (available == 0)
+                            break;
+
+                        if (available > MaxImageBytes - data.size())
+                        {
+                            ok = false;
+                            break;
+                        }
+
+                        const size_t oldSize = data.size();
+                        data.resize(oldSize + available);
+
+                        DWORD received = 0;
+
+                        if (!WinHttpReadData(
+                            request,
+                            data.data() + oldSize,
+                            available,
+                            &received) ||
+                            received == 0)
+                        {
+                            data.resize(oldSize);
+                            ok = false;
+                            break;
+                        }
+
+                        data.resize(oldSize + received);
+                    }
+
+                    if (data.empty())
+                        ok = false;
+                }
+            }
+        }
+
+        if (request)
+            WinHttpCloseHandle(request);
+
+        if (connection)
+            WinHttpCloseHandle(connection);
+
+        WinHttpCloseHandle(session);
+
+        if (!ok)
+            data.clear();
+
+        return ok;
+    }
 
     static bool ReadHtmlClipboard(
         LPDATAOBJECT dataObject,
@@ -333,6 +515,166 @@ namespace
         }
     }
 
+
+
+    static void AppendHex(
+        std::string& out,
+        const BYTE* bytes,
+        size_t size)
+    {
+        static constexpr char hex[] = "0123456789abcdef";
+
+        for (size_t i = 0; i < size; ++i)
+        {
+            out.push_back(hex[bytes[i] >> 4]);
+            out.push_back(hex[bytes[i] & 15]);
+        }
+    }
+
+    static bool AppendBitmapRtf(
+        std::string& rtf,
+        const std::vector<BYTE>& encoded)
+    {
+        using Microsoft::WRL::ComPtr;
+
+        if (encoded.empty() ||
+            encoded.size() > (std::numeric_limits<UINT>::max)())
+        {
+            return false;
+        }
+
+        ComPtr<IWICImagingFactory> factory;
+
+        HRESULT hr = CoCreateInstance(
+            CLSID_WICImagingFactory,
+            nullptr,
+            CLSCTX_INPROC_SERVER,
+            IID_PPV_ARGS(&factory));
+
+        if (FAILED(hr))
+            return false;
+
+        ComPtr<IWICStream> stream;
+
+        hr = factory->CreateStream(&stream);
+        if (FAILED(hr))
+            return false;
+
+        hr = stream->InitializeFromMemory(
+            const_cast<BYTE*>(encoded.data()),
+            static_cast<DWORD>(encoded.size()));
+
+        if (FAILED(hr))
+            return false;
+
+        ComPtr<IWICBitmapDecoder> decoder;
+
+        hr = factory->CreateDecoderFromStream(
+            stream.Get(),
+            nullptr,
+            WICDecodeMetadataCacheOnLoad,
+            &decoder);
+
+        if (FAILED(hr))
+            return false;
+
+        ComPtr<IWICBitmapFrameDecode> frame;
+
+        hr = decoder->GetFrame(0, &frame);
+        if (FAILED(hr))
+            return false;
+
+        UINT width = 0;
+        UINT height = 0;
+
+        if (FAILED(frame->GetSize(&width, &height)) ||
+            width == 0 || height == 0 ||
+            width > 8192 || height > 8192)
+        {
+            return false;
+        }
+
+        // Bound the decoded allocation as well as the downloaded bytes.
+        const uint64_t pixelCount =
+            static_cast<uint64_t>(width) * height;
+
+        if (pixelCount > 16ull * 1024 * 1024)
+            return false;
+
+        ComPtr<IWICFormatConverter> converter;
+
+        hr = factory->CreateFormatConverter(&converter);
+        if (FAILED(hr))
+            return false;
+
+        hr = converter->Initialize(
+            frame.Get(),
+            GUID_WICPixelFormat24bppBGR,
+            WICBitmapDitherTypeNone,
+            nullptr,
+            0.0,
+            WICBitmapPaletteTypeCustom);
+
+        if (FAILED(hr))
+            return false;
+
+        // DIB scanlines are padded to four-byte boundaries.
+        const UINT stride = (width * 3u + 3u) & ~3u;
+        const uint64_t pixelBytes64 =
+            static_cast<uint64_t>(stride) * height;
+
+        if (pixelBytes64 > (std::numeric_limits<UINT>::max)())
+            return false;
+
+        const UINT pixelBytes = static_cast<UINT>(pixelBytes64);
+
+        std::vector<BYTE> pixels(pixelBytes);
+
+        hr = converter->CopyPixels(
+            nullptr, stride, pixelBytes, pixels.data());
+
+        if (FAILED(hr))
+            return false;
+
+        BITMAPINFOHEADER bih = {};
+        bih.biSize = sizeof(bih);
+        bih.biWidth = static_cast<LONG>(width);
+        bih.biHeight = static_cast<LONG>(height);
+        bih.biPlanes = 1;
+        bih.biBitCount = 24;
+        bih.biCompression = BI_RGB;
+        bih.biSizeImage = pixelBytes;
+
+        // RTF dimensions are expressed in twips (1/1440 inch).
+        const int picwgoal = static_cast<int>(
+            std::min<uint64_t>(
+                static_cast<uint64_t>(width) * 15,
+                1000000));
+
+        const int pichgoal = static_cast<int>(
+            std::min<uint64_t>(
+                static_cast<uint64_t>(height) * 15,
+                1000000));
+
+        rtf += "{\\pict\\dibitmap0";
+        rtf += "\\picw" + std::to_string(width);
+        rtf += "\\pich" + std::to_string(height);
+        rtf += "\\picwgoal" + std::to_string(picwgoal);
+        rtf += "\\pichgoal" + std::to_string(pichgoal);
+        rtf += "\n";
+
+        AppendHex(
+            rtf,
+            reinterpret_cast<const BYTE*>(&bih),
+            sizeof(bih));
+
+        AppendHex(rtf, pixels.data(), pixels.size());
+
+        rtf += "}";
+
+        return true;
+    }
+
     static std::wstring DecodeHtmlEntities(const std::wstring& text)
     {
         std::wstring result;
@@ -458,7 +800,22 @@ namespace
         return {};
     }
 
+    static bool AppendRemoteRtfImage(
+        std::string& rtf,
+        const std::wstring& tag)
+    {
+        const std::wstring src = GetHtmlAttribute(tag, L"src");
 
+        if (src.empty() || src.size() > 8192)
+            return false;
+
+        std::vector<BYTE> imageBytes;
+
+        if (!DownloadHttpsImage(src, imageBytes))
+            return false;
+
+        return AppendBitmapRtf(rtf, imageBytes);
+    }
 
     static bool DecodeBase64(
         const std::wstring& input,
@@ -700,14 +1057,13 @@ namespace
                 continue;
             }
 
-
             if (name == L"img" && !closing)
             {
-                if (!AppendRtfImage(rtf, tag))
+                if (!AppendRemoteRtfImage(rtf, tag))
                 {
-                    // Unsupported or unavailable image: retain its alternative
-                    // text rather than silently losing all indication of it.
-                    const std::wstring alt = GetHtmlAttribute(tag, L"alt");
+                    const std::wstring alt =
+                        GetHtmlAttribute(tag, L"alt");
+
                     if (!alt.empty())
                         AppendRtfText(rtf, alt);
                 }
