@@ -483,6 +483,7 @@ namespace
         return !html.empty();
     }
 
+
     static void AppendRtfText(
         std::string& rtf,
         const std::wstring& text)
@@ -800,6 +801,24 @@ namespace
         return {};
     }
 
+    static void AppendRtfAlignment(
+        std::string& rtf,
+        const std::wstring& tag)
+    {
+        const std::wstring style =
+            LowerHtml(GetHtmlAttribute(tag, L"style"));
+
+        if (style.find(L"text-align:center") != std::wstring::npos)
+            rtf += "\\qc ";
+        else if (style.find(L"text-align:right") != std::wstring::npos)
+            rtf += "\\qr ";
+        else if (style.find(L"text-align:justify") != std::wstring::npos)
+            rtf += "\\qj ";
+        else
+            rtf += "\\ql ";
+    }
+
+
     static bool AppendRemoteRtfImage(
         std::string& rtf,
         const std::wstring& tag)
@@ -1035,6 +1054,15 @@ namespace
 
             const std::wstring name =
                 lower.substr(nameStart, nameEnd - nameStart);
+
+            if (!closing &&
+                (name == L"p" || name == L"div" ||
+                    name == L"h1" || name == L"h2" ||
+                    name == L"h3" || name == L"h4"))
+            {
+                paragraph();
+                AppendRtfAlignment(rtf, tag);
+            }
 
             if (name == L"script" || name == L"style")
             {
