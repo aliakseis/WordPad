@@ -1251,7 +1251,6 @@
     <ClCompile Include="pageset.cpp" />
     <ClCompile Include="PasteHtmlIntoRichEdit.cpp" />
     <ClCompile Include="ruler.cpp" />
-    <ClCompile Include="splash.cpp" />
     <ClCompile Include="srvritem.cpp" />
     <ClCompile Include="stdafx.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Create</PrecompiledHeader>
@@ -1312,7 +1311,6 @@
     <ClInclude Include="PasteHtmlIntoRichEdit.h" />
     <ClInclude Include="Resource.h" />
     <ClInclude Include="ruler.h" />
-    <ClInclude Include="splash.h" />
     <ClInclude Include="srvritem.h" />
     <ClInclude Include="stdafx.h" />
     <ClInclude Include="strings.h" />

@@ -154,8 +154,6 @@ BOOL CWordPadApp::InitInstance()
 	LoadOptions();
 
 	Enable3dControls();
-	CSplashWnd splash;
-	BOOL bSplash = cmdInfo.m_bShowSplash;
 	if (!cmdInfo.m_bRunEmbedded)
 	{
 		switch (m_nCmdShow)
@@ -164,7 +162,6 @@ BOOL CWordPadApp::InitInstance()
 			case SW_SHOWMINIMIZED:
 			case SW_MINIMIZE:
 			case SW_SHOWMINNOACTIVE:
-				bSplash = FALSE;
 				break;
 			case SW_RESTORE:
 			case SW_SHOW:
@@ -184,14 +181,6 @@ BOOL CWordPadApp::InitInstance()
 		m_nCmdShow = SW_SHOWNORMAL;
 	}
 	int nCmdShow = m_nCmdShow;
-
-	if (bSplash)
-	{
-		// only show splash if not embedded
-		splash.Create(NULL);
-		splash.ShowWindow(SW_SHOW);
-		splash.UpdateWindow();
-	}
 
 	LoadAbbrevStrings();
 
@@ -279,9 +268,6 @@ BOOL CWordPadApp::InitInstance()
 	m_bPromptForType = FALSE;
 	OnFileNew();
 	m_bPromptForType = TRUE;
-	// destroy splash window
-	if (cmdInfo.m_bShowSplash)
-		splash.DestroyWindow();
 	m_nCmdShow = -1;
 	if (m_pMainWnd == NULL) // i.e. OnFileNew failed
 		return FALSE;

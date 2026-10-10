@@ -560,7 +560,7 @@ void CMainFrame::AdjustObjectSubmenu (CMFCPopupMenu* pMenuPopup)
 		return;
 	}
 
-	int iIndex = pMenuBar->CommandToIndex (ID_OLE_VERB_POPUP);
+	int iIndex = pMenuBar->CommandToIndex (ID_OLE_VERB_PPAP);
 	if (iIndex < 0)
 	{
 		return;

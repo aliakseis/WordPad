@@ -49,7 +49,7 @@ IMPLEMENT_DYNCREATE(CWordPadDoc, CRichEditDoc)
 BEGIN_MESSAGE_MAP(CWordPadDoc, CRichEditDoc)
 	//{{AFX_MSG_MAP(CWordPadDoc)
 	ON_COMMAND(ID_VIEW_OPTIONS, OnViewOptions)
-	ON_UPDATE_COMMAND_UI(ID_OLE_VERB_POPUP, OnUpdateOleVerbPopup)
+	ON_UPDATE_COMMAND_UI(ID_OLE_VERB_PPAP, OnUpdateOleVerbPopup)
 	ON_COMMAND(ID_FILE_SEND_MAIL, OnFileSendMail)
 	ON_UPDATE_COMMAND_UI(ID_FILE_NEW, OnUpdateIfEmbedded)
 	ON_UPDATE_COMMAND_UI(ID_FILE_OPEN, OnUpdateIfEmbedded)
@@ -549,7 +549,7 @@ void CWordPadDoc::OnUpdateOleVerbPopup(CCmdUI* pCmdUI)
 
 BOOL CWordPadDoc::OnCmdMsg(UINT nID, int nCode, void* pExtra, AFX_CMDHANDLERINFO* pHandlerInfo)
 {
-	if (nCode == CN_COMMAND && nID == ID_OLE_VERB_POPUP)
+	if (nCode == CN_COMMAND && nID == ID_OLE_VERB_PPAP)
 		nID = ID_OLE_VERB_FIRST;
 	return CRichEditDoc::OnCmdMsg(nID, nCode, pExtra, pHandlerInfo);
 }

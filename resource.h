@@ -87,7 +87,6 @@
 #define IDI_ICON_WRITE                  155
 #define IDS_DT8                         156
 #define IDS_DT9                         157
-#define IDD_SPLASH                      157
 #define IDS_DT10                        158
 #define IDD_OPTIONS_UNITS               158
 #define IDS_DT11                        159
@@ -167,7 +166,6 @@
 #define IDC_TEXT_WRAP                   1020
 #define IDC_TEXT_UNITS                  1021
 #define IDC_BOX                         1022
-#define IDC_BIGICON                     1023
 #define IDC_UNITS_IN                    1024
 #define IDC_UNITS_CM                    1025
 #define IDC_WRAP_RULER                  1025
@@ -205,7 +203,7 @@
 #define ID_PEN_SPACE                    32808
 #define ID_PEN_BACKSPACE                32809
 #define ID_PEN_NEWLINE                  32810
-#define ID_OLE_VERB_POPUP               32811
+#define ID_OLE_VERB_PPAP                32811
 #define ID_PEN_TOGGLE                   32812
 #define ID_PEN_LENS                     32813
 #define ID_PEN_TAB                      32814
