@@ -25,6 +25,10 @@
 #include <wrl/client.h>
 
 #include <limits>
+#include <map>
+#include <atomic>
+#include <thread>
+#include <chrono>
 
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "windowscodecs.lib")
@@ -39,10 +43,17 @@ static char BASED_CODE THIS_FILE[] = __FILE__;
 
 namespace
 {
+    using Clock = std::chrono::steady_clock;
+    using HtmlImageCache = std::map<std::wstring, std::vector<BYTE>>;
+
+    constexpr size_t MaxRemoteImages = 16;
+    constexpr size_t MaxCachedImageBytes = 32u * 1024u * 1024u;
+    constexpr size_t MaxParallelDownloads = 4;
 
     bool DownloadHttpsImage(
         const std::wstring& url,
-        std::vector<BYTE>& data)
+        std::vector<BYTE>& data,
+        Clock::time_point deadline)
     {
         constexpr DWORD MaxImageBytes = 16u * 1024u * 1024u;
 
@@ -55,7 +66,8 @@ namespace
         parts.dwUrlPathLength = DWORD(-1);
         parts.dwExtraInfoLength = DWORD(-1);
 
-        if (!WinHttpCrackUrl(url.c_str(), 0, 0, &parts))
+        if (Clock::now() >= deadline ||
+            !WinHttpCrackUrl(url.c_str(), 0, 0, &parts))
             return false;
 
         if (parts.nScheme != INTERNET_SCHEME_HTTPS ||
@@ -85,17 +97,10 @@ namespace
         if (!session)
             return false;
 
-        WinHttpSetTimeouts(session, 5000, 5000, 10000, 10000);
+        WinHttpSetTimeouts(session, 2000, 2000, 2500, 2500);
 
         // Do not follow redirects automatically: a redirect could point
         // to an HTTP URL or an unintended internal destination.
-        DWORD redirectPolicy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
-        WinHttpSetOption(
-            session,
-            WINHTTP_OPTION_REDIRECT_POLICY,
-            &redirectPolicy,
-            sizeof(redirectPolicy));
-
         HINTERNET connection = WinHttpConnect(
             session, host.c_str(), parts.nPort, 0);
 
@@ -110,9 +115,20 @@ namespace
                 WINHTTP_FLAG_SECURE)
             : nullptr;
 
+        // Never follow redirects; this also prevents redirecting to HTTP.
+        if (request)
+        {
+            DWORD redirectPolicy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+            WinHttpSetOption(
+                request,
+                WINHTTP_OPTION_REDIRECT_POLICY,
+                &redirectPolicy,
+                sizeof(redirectPolicy));
+        }
+
         bool ok = false;
 
-        if (request &&
+        if (request && Clock::now() < deadline &&
             WinHttpSendRequest(
                 request,
                 WINHTTP_NO_ADDITIONAL_HEADERS,
@@ -156,6 +172,12 @@ namespace
 
                     for (;;)
                     {
+                        if (Clock::now() >= deadline)
+                        {
+                            ok = false;
+                            break;
+                        }
+
                         DWORD available = 0;
 
                         if (!WinHttpQueryDataAvailable(request, &available))
@@ -609,6 +631,20 @@ namespace
         if (FAILED(hr))
             return false;
 
+        // WIC CopyPixels returns scanlines top-to-bottom, while a
+        // positive-height BI_RGB DIB stores them bottom-to-top. Reverse
+        // the rows before serializing the DIB into RTF; otherwise the
+        // pasted image appears vertically flipped.
+        for (UINT y = 0; y < height / 2; ++y)
+        {
+            BYTE* top = pixels.data() +
+                static_cast<size_t>(y) * stride;
+            BYTE* bottom = pixels.data() +
+                static_cast<size_t>(height - 1 - y) * stride;
+
+            std::swap_ranges(top, top + stride, bottom);
+        }
+
         BITMAPINFOHEADER bih = {};
         bih.biSize = sizeof(bih);
         bih.biWidth = static_cast<LONG>(width);
@@ -773,6 +809,100 @@ namespace
         return {};
     }
 
+    HtmlImageCache PrefetchRemoteImages(const std::wstring& html)
+    {
+        std::vector<std::wstring> urls;
+        std::map<std::wstring, size_t> urlIndices;
+        const std::wstring lowerHtml = LowerHtml(html);
+
+        // Extract only <img ...> tags; preserve the existing attribute parser.
+        for (size_t pos = 0; pos < html.size() && urls.size() < MaxRemoteImages;)
+        {
+            const size_t open = lowerHtml.find(L"<img", pos);
+            if (open == std::wstring::npos)
+                break;
+
+            const size_t nameEnd = open + 4;
+            if (nameEnd < html.size() &&
+                !iswspace(html[nameEnd]) &&
+                html[nameEnd] != L'>' &&
+                html[nameEnd] != L'/')
+            {
+                pos = nameEnd;
+                continue;
+            }
+
+            const size_t end = html.find(L'>', nameEnd);
+            if (end == std::wstring::npos)
+                break;
+
+            const std::wstring tag = html.substr(open + 1, end - open - 1);
+            const std::wstring src = GetHtmlAttribute(tag, L"src");
+
+            if (src.size() <= 8192 &&
+                src.size() >= 8 &&
+                _wcsnicmp(src.c_str(), L"https://", 8) == 0 &&
+                urlIndices.find(src) == urlIndices.end())
+            {
+                urlIndices.emplace(src, urls.size());
+                urls.push_back(src);
+            }
+
+            pos = end + 1;
+        }
+
+        HtmlImageCache cache;
+        if (urls.empty())
+            return cache;
+
+        const Clock::time_point deadline =
+            Clock::now() + std::chrono::seconds(5);
+
+        std::vector<std::vector<BYTE>> results(urls.size());
+        std::vector<unsigned char> succeeded(urls.size(), 0);
+        std::atomic<size_t> next{ 0 };
+
+        const size_t workerCount =
+            (std::min)(MaxParallelDownloads, urls.size());
+
+        std::vector<std::thread> workers;
+        workers.reserve(workerCount);
+
+        for (size_t n = 0; n < workerCount; ++n)
+        {
+            workers.emplace_back([&]()
+            {
+                for (;;)
+                {
+                    const size_t i = next.fetch_add(1);
+                    if (i >= urls.size() || Clock::now() >= deadline)
+                        return;
+
+                    succeeded[i] = DownloadHttpsImage(
+                        urls[i], results[i], deadline) ? 1 : 0;
+                }
+            });
+        }
+
+        for (auto& worker : workers)
+            worker.join();
+
+        size_t totalBytes = 0;
+        for (size_t i = 0; i < urls.size(); ++i)
+        {
+            if (!succeeded[i] || results[i].empty())
+                continue;
+
+            if (results[i].size() > MaxCachedImageBytes - totalBytes)
+                continue;
+
+            totalBytes += results[i].size();
+            cache.emplace(urls[i], std::move(results[i]));
+        }
+
+        return cache;
+    }
+
     void AppendRtfAlignment(
         std::string& rtf,
         const std::wstring& tag)
@@ -793,19 +923,20 @@ namespace
 
     bool AppendRemoteRtfImage(
         std::string& rtf,
-        const std::wstring& tag)
+        const std::wstring& tag,
+        const HtmlImageCache& imageCache)
     {
         const std::wstring src = GetHtmlAttribute(tag, L"src");
 
         if (src.empty() || src.size() > 8192)
             return false;
 
-        std::vector<BYTE> imageBytes;
-
-        if (!DownloadHttpsImage(src, imageBytes))
+        const auto it = imageCache.find(src);
+        if (it == imageCache.end())
             return false;
 
-        return AppendBitmapRtf(rtf, imageBytes);
+        // Keep the original, known-working DIB-to-RTF serialization.
+        return AppendBitmapRtf(rtf, it->second);
     }
 
     bool DecodeBase64(
@@ -937,7 +1068,7 @@ namespace
         return true;
     }
 
-    std::string HtmlToRtf(const std::wstring& html)
+    std::string HtmlToRtf(const std::wstring& html, const HtmlImageCache& imageCache)
     {
         std::string rtf =
             "{\\rtf1\\ansi\\deff0"
@@ -956,7 +1087,7 @@ namespace
                 if (paragraphStarted)
                     rtf += "\\par\n";
 
-                paragraphStarted = true;
+                paragraphStarted = false;
             };
 
         size_t i = 0;
@@ -996,6 +1127,8 @@ namespace
                 }
 
                 AppendRtfText(rtf, text);
+                if (!text.empty())
+                    paragraphStarted = true;
                 i = end;
                 continue;
             }
@@ -1027,15 +1160,6 @@ namespace
             const std::wstring name =
                 lower.substr(nameStart, nameEnd - nameStart);
 
-            if (!closing &&
-                (name == L"p" || name == L"div" ||
-                    name == L"h1" || name == L"h2" ||
-                    name == L"h3" || name == L"h4"))
-            {
-                paragraph();
-                AppendRtfAlignment(rtf, tag);
-            }
-
             if (name == L"script" || name == L"style")
             {
                 if (!closing)
@@ -1059,7 +1183,11 @@ namespace
 
             if (name == L"img" && !closing)
             {
-                if (!AppendRemoteRtfImage(rtf, tag))
+                const bool inserted =
+                    AppendRtfImage(rtf, tag) ||
+                    AppendRemoteRtfImage(rtf, tag, imageCache);
+
+                if (!inserted)
                 {
                     const std::wstring alt =
                         GetHtmlAttribute(tag, L"alt");
@@ -1082,17 +1210,49 @@ namespace
             {
                 paragraph();
 
-                if (name == L"li" && !closing)
+                if (!closing)
                 {
-                    if (listDepth > 0)
-                        rtf += "\\tab ";
-                    rtf += "\\bullet\\tab ";
-                }
+                    if (name == L"p" || name == L"div" ||
+                        name == L"h1" || name == L"h2" ||
+                        name == L"h3" || name == L"h4")
+                    {
+                        AppendRtfAlignment(rtf, tag);
+                    }
 
-                if (name == L"h1") rtf += "\\fs36\\b ";
-                else if (name == L"h2") rtf += "\\fs30\\b ";
-                else if (name == L"h3") rtf += "\\fs26\\b ";
-                else if (name == L"h4") rtf += "\\fs24\\b ";
+                    if (name == L"li")
+                    {
+                        if (listDepth > 0)
+                            rtf += "\\tab ";
+                        rtf += "\\bullet\\tab ";
+                        paragraphStarted = true;
+                    }
+
+                    if (name == L"blockquote")
+                        rtf += "\\li720 ";
+
+                    if (name == L"h1") rtf += "\\fs36\\b ";
+                    else if (name == L"h2") rtf += "\\fs30\\b ";
+                    else if (name == L"h3") rtf += "\\fs26\\b ";
+                    else if (name == L"h4") rtf += "\\fs24\\b ";
+                }
+                else
+                {
+                    if (name == L"h1" || name == L"h2" ||
+                        name == L"h3" || name == L"h4")
+                    {
+                        rtf += "\\b0\\fs20 ";
+                    }
+
+                    if (name == L"blockquote")
+                        rtf += "\\li0 ";
+
+                    if (name == L"p" || name == L"div" ||
+                        name == L"h1" || name == L"h2" ||
+                        name == L"h3" || name == L"h4")
+                    {
+                        rtf += "\\ql ";
+                    }
+                }
             }
             else if (name == L"ul" || name == L"ol")
             {
@@ -1270,7 +1430,10 @@ HRESULT PasteHtmlIntoRichEdit(
     if (!ReadHtmlClipboard(dataObject, htmlFormat, html))
         return DV_E_FORMATETC;
 
-    const std::string rtf = HtmlToRtf(html);
+    // Fetch remote images concurrently before constructing the RTF.
+    // The original bitmap serialization is intentionally unchanged.
+    const HtmlImageCache imageCache = PrefetchRemoteImages(html);
+    const std::string rtf = HtmlToRtf(html, imageCache);
 
     if (rtf.empty())
         return E_FAIL;
