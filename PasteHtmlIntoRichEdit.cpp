@@ -855,6 +855,8 @@ namespace
         if (urls.empty())
             return cache;
 
+        CWaitCursor wait;
+
         const Clock::time_point deadline =
             Clock::now() + std::chrono::seconds(5);
 
