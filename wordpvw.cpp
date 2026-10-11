@@ -27,6 +27,7 @@
 
 #include "PasteHtmlIntoRichEdit.h"
 
+#include <vector>
 
 extern CLIPFORMAT cfEmbeddedObject;
 extern CLIPFORMAT cfRTO;
@@ -137,6 +138,7 @@ BEGIN_MESSAGE_MAP(CWordPadView, CRichEditView)
 	ON_CBN_SELENDOK(IDC_FONTSIZE, OnFontsize)
 	ON_COMMAND_RANGE(ID_BORDER_1, ID_BORDER_13, OnBorderType)
 	ON_UPDATE_COMMAND_UI_RANGE(ID_BORDER_1, ID_BORDER_13, OnUpdateBorderType)
+    ON_NOTIFY(EN_LINK, AFX_IDW_PANE_FIRST, OnLink)
 END_MESSAGE_MAP()
 
 /////////////////////////////////////////////////////////////////////////////
@@ -439,6 +441,10 @@ int CWordPadView::OnCreate(LPCREATESTRUCT lpCreateStruct)
 	m_defParaFormat.cTabCount = 0;
 
 	SetTextColor ((COLORREF) -1);	// Automatic
+
+    CRichEditCtrl& re = GetRichEditCtrl();
+    re.SetEventMask(re.GetEventMask() | ENM_LINK);
+
 	return 0;
 }
 
@@ -1081,4 +1087,62 @@ void CWordPadView::OnBorderType (UINT id)
 void CWordPadView::OnUpdateBorderType (CCmdUI* pCmdUI)
 {
 	pCmdUI->SetCheck (pCmdUI->m_nID == m_nBorderType);
+}
+
+void CWordPadView::OnLink(NMHDR* pNMHDR, LRESULT* pResult)
+{
+    *pResult = 0;
+
+    ENLINK* pLink = reinterpret_cast<ENLINK*>(pNMHDR);
+    if (pLink == nullptr ||
+        pLink->msg != WM_LBUTTONUP ||
+        (GetKeyState(VK_CONTROL) >= 0))
+    {
+        return;
+    }
+
+    // Obtain the visible text of the hyperlink.
+    const LONG start = pLink->chrg.cpMin;
+    const LONG end = pLink->chrg.cpMax;
+
+    if (start < 0 || end <= start || end - start > 32768)
+        return;
+
+    std::vector<TCHAR> buffer(
+        static_cast<size_t>(end - start) + 1, _T('\0'));
+
+    TEXTRANGE tr = {};
+    tr.chrg = pLink->chrg;
+    tr.lpstrText = buffer.data();
+
+    if (GetRichEditCtrl().SendMessage(
+        EM_GETTEXTRANGE, 0,
+        reinterpret_cast<LPARAM>(&tr)) <= 0)
+    {
+        return;
+    }
+
+    CString url(buffer.data());
+    url.Trim();
+
+    // Avoid passing arbitrary text to the shell.
+    if (url.IsEmpty() ||
+        url.Find(_T("://")) < 0)
+    {
+        return;
+    }
+
+    // Open with the user's registered application/browser.
+    HINSTANCE result = ShellExecute(
+        GetSafeHwnd(),
+        _T("open"),
+        url,
+        nullptr,
+        nullptr,
+        SW_SHOWNORMAL);
+
+    if (reinterpret_cast<INT_PTR>(result) <= 32)
+        MessageBeep(MB_ICONWARNING);
+
+    *pResult = 1;
 }

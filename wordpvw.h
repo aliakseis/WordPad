@@ -119,6 +119,7 @@ protected:
 	afx_msg void OnBarReturn(UINT, NMHDR*, LRESULT* );
 	afx_msg void OnBorderType (UINT id);
 	afx_msg void OnUpdateBorderType (CCmdUI* pCmdUI);
+    afx_msg void OnLink(NMHDR* pNMHDR, LRESULT* pResult);
 	DECLARE_MESSAGE_MAP()
 };
 
