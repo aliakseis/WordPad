@@ -46,7 +46,7 @@ namespace
     using Clock = std::chrono::steady_clock;
     using HtmlImageCache = std::map<std::wstring, std::vector<BYTE>>;
 
-    constexpr size_t MaxRemoteImages = 16;
+    constexpr size_t MaxRemoteImages = 50;
     constexpr size_t MaxCachedImageBytes = 32u * 1024u * 1024u;
     constexpr size_t MaxParallelDownloads = 4;
 
@@ -1118,16 +1118,74 @@ namespace
         return true;
     }
 
+    bool IsSafeHyperlink(const std::wstring& url)
+    {
+        if (url.empty() || url.size() > 2048)
+            return false;
+
+        // Rich Edit fields are intended for navigable links, not arbitrary
+        // field instructions. Accept only explicit web and mail links.
+        const std::wstring lower = LowerHtml(url);
+        if (lower.rfind(L"https://", 0) != 0 &&
+            lower.rfind(L"http://", 0) != 0 &&
+            lower.rfind(L"mailto:", 0) != 0)
+            return false;
+
+        for (wchar_t ch : url)
+        {
+            if (ch < 0x20 || ch == 0x7f || ch == L'"' || ch == L'\r' || ch == L'\n')
+                return false;
+        }
+        return true;
+    }
+
+    void AppendRtfFieldInstruction(std::string& rtf, const std::wstring& text)
+    {
+        for (wchar_t ch : text)
+        {
+            switch (ch)
+            {
+            case L'\\': rtf += "\\\\"; break;
+            case L'{':  rtf += "\\{"; break;
+            case L'}':  rtf += "\\}"; break;
+            default:
+                if (ch >= 0x20 && ch < 0x7f)
+                    rtf.push_back(static_cast<char>(ch));
+                else
+                {
+                    rtf += "\\u";
+                    rtf += std::to_string(static_cast<short>(ch));
+                    rtf += "?";
+                }
+                break;
+            }
+        }
+    }
+
+    void AppendHyperlinkField(
+        std::string& rtf,
+        const std::wstring& url,
+        const std::string& contents)
+    {
+        rtf += "{\\field{\\*\\fldinst HYPERLINK \"";
+        AppendRtfFieldInstruction(rtf, url);
+        rtf += "\"}{\\fldrslt {\\ul\\cf1 ";
+        rtf += contents;
+        rtf += "}}}";
+    }
+
     std::string HtmlToRtf(const std::wstring& html, const HtmlImageCache& imageCache)
     {
         std::string rtf =
             "{\\rtf1\\ansi\\deff0"
             "{\\fonttbl{\\f0\\fnil Segoe UI;}}"
+            "{\\colortbl;\\red0\\green0\\blue255;}"
             "\\viewkind4\\uc1 ";
 
         bool bold = false;
         bool italic = false;
         bool underline = false;
+        std::wstring activeHyperlink;
         bool inPre = false;
         bool paragraphStarted = false;
         int listDepth = 0;
@@ -1176,9 +1234,20 @@ namespace
                     text.swap(collapsed);
                 }
 
-                AppendRtfText(rtf, text);
                 if (!text.empty())
+                {
+                    if (!activeHyperlink.empty())
+                    {
+                        std::string encodedText;
+                        AppendRtfText(encodedText, text);
+                        AppendHyperlinkField(rtf, activeHyperlink, encodedText);
+                    }
+                    else
+                    {
+                        AppendRtfText(rtf, text);
+                    }
                     paragraphStarted = true;
+                }
                 i = end;
                 continue;
             }
@@ -1233,19 +1302,36 @@ namespace
 
             if (name == L"img" && !closing)
             {
+                // Emit images as their own field result when linked. Keeping a
+                // field open across adjacent text/image nodes can make Rich Edit
+                // relocate pictures or alter inline spacing.
+                std::string imageRtf;
                 const bool inserted =
-                    AppendRtfImage(rtf, tag) ||
-                    AppendRemoteRtfImage(rtf, tag, imageCache);
+                    AppendRtfImage(imageRtf, tag) ||
+                    AppendRemoteRtfImage(imageRtf, tag, imageCache);
 
-                if (!inserted)
+                if (inserted)
                 {
-                    const std::wstring alt =
-                        GetHtmlAttribute(tag, L"alt");
-
-                    if (!alt.empty())
-                        AppendRtfText(rtf, alt);
+                    if (!activeHyperlink.empty())
+                        AppendHyperlinkField(rtf, activeHyperlink, imageRtf);
+                    else
+                        rtf += imageRtf;
                 }
-
+                else
+                {
+                    const std::wstring alt = GetHtmlAttribute(tag, L"alt");
+                    if (!alt.empty())
+                    {
+                        if (!activeHyperlink.empty())
+                        {
+                            std::string encodedAlt;
+                            AppendRtfText(encodedAlt, alt);
+                            AppendHyperlinkField(rtf, activeHyperlink, encodedAlt);
+                        }
+                        else
+                            AppendRtfText(rtf, alt);
+                    }
+                }
                 paragraphStarted = true;
             }
             else if (name == L"br" && !closing)
@@ -1407,9 +1493,25 @@ namespace
             }
             else if (name == L"a")
             {
-                // Preserve hyperlink text and underline it.
-                underline = !closing;
-                rtf += underline ? "\\ul " : "\\ul0 ";
+                if (closing)
+                {
+                    activeHyperlink.clear();
+                    underline = false;
+                    rtf += "\\ul0 ";
+                }
+                else
+                {
+                    // Store the URL and emit short, independent RTF fields for
+                    // each text run or image. This avoids fields spanning block
+                    // tags or image objects, preserving their relative layout.
+                    const std::wstring href = DecodeHtmlEntities(
+                        GetHtmlAttribute(tag, L"href"));
+                    activeHyperlink = IsSafeHyperlink(href)
+                        ? href : std::wstring();
+                    if (activeHyperlink.empty())
+                        rtf += "\\ul ";
+                    underline = true;
+                }
             }
         }
 
