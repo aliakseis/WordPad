@@ -724,15 +724,33 @@ namespace
                 const bool hex = entity.size() > 2 &&
                     (entity[1] == L'x' || entity[1] == L'X');
 
-                const unsigned long value = wcstoul(
+                unsigned long value = wcstoul(
                     entity.c_str() + (hex ? 2 : 1),
                     &tail, hex ? 16 : 10);
 
-                if (tail && *tail == 0 &&
-                    value > 0 && value <= 0xFFFF &&
-                    !(value >= 0xD800 && value <= 0xDFFF))
+                if (tail && *tail == 0)
                 {
-                    decoded = static_cast<wchar_t>(value);
+                    if (value <= 0xFFFF &&
+                        !(value >= 0xD800 && value <= 0xDFFF))
+                    {
+                        result.push_back(
+                            static_cast<wchar_t>(value));
+                    }
+                    else if (value <= 0x10FFFF)
+                    {
+                        value -= 0x10000;
+
+                        result.push_back(
+                            static_cast<wchar_t>(
+                                0xD800 + (value >> 10)));
+
+                        result.push_back(
+                            static_cast<wchar_t>(
+                                0xDC00 + (value & 0x3FF)));
+                    }
+
+                    i = semicolon + 1;
+                    continue;
                 }
             }
 
@@ -809,6 +827,36 @@ namespace
         return {};
     }
 
+    static size_t FindTagEnd(
+        const std::wstring& html,
+        size_t start)
+    {
+        wchar_t quote = 0;
+
+        for (size_t i = start; i < html.size(); ++i)
+        {
+            const wchar_t ch = html[i];
+
+            if (quote)
+            {
+                if (ch == quote)
+                    quote = 0;
+                continue;
+            }
+
+            if (ch == L'"' || ch == L'\'')
+            {
+                quote = ch;
+                continue;
+            }
+
+            if (ch == L'>')
+                return i;
+        }
+
+        return std::wstring::npos;
+    }
+
     HtmlImageCache PrefetchRemoteImages(const std::wstring& html)
     {
         std::vector<std::wstring> urls;
@@ -832,7 +880,7 @@ namespace
                 continue;
             }
 
-            const size_t end = html.find(L'>', nameEnd);
+            const size_t end = FindTagEnd(html, nameEnd);
             if (end == std::wstring::npos)
                 break;
 
@@ -1135,7 +1183,7 @@ namespace
                 continue;
             }
 
-            const size_t end = html.find(L'>', i + 1);
+            const size_t end = FindTagEnd(html, i + 1);
             if (end == std::wstring::npos)
             {
                 AppendRtfText(rtf, html.substr(i));
@@ -1174,7 +1222,7 @@ namespace
                     if (p != std::wstring::npos)
                     {
                         const size_t closeEnd =
-                            html.find(L'>', i + p);
+                            FindTagEnd(html, i + p);
 
                         i = closeEnd == std::wstring::npos
                             ? html.size() : closeEnd + 1;
