@@ -526,9 +526,283 @@ namespace
         }
     }
 
+
+    struct ImageDisplaySize
+    {
+        int widthTwips = 0;
+        int heightTwips = 0;
+    };
+
+    bool GetEncodedImageSize(
+        const std::vector<BYTE>& encoded,
+        UINT& width,
+        UINT& height)
+    {
+        using Microsoft::WRL::ComPtr;
+
+        width = height = 0;
+        if (encoded.empty() ||
+            encoded.size() > (std::numeric_limits<UINT>::max)())
+            return false;
+
+        ComPtr<IWICImagingFactory> factory;
+        HRESULT hr = CoCreateInstance(
+            CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+            IID_PPV_ARGS(&factory));
+        if (FAILED(hr))
+            return false;
+
+        ComPtr<IWICStream> stream;
+        hr = factory->CreateStream(&stream);
+        if (FAILED(hr))
+            return false;
+
+        hr = stream->InitializeFromMemory(
+            const_cast<BYTE*>(encoded.data()),
+            static_cast<DWORD>(encoded.size()));
+        if (FAILED(hr))
+            return false;
+
+        ComPtr<IWICBitmapDecoder> decoder;
+        hr = factory->CreateDecoderFromStream(
+            stream.Get(), nullptr, WICDecodeMetadataCacheOnLoad, &decoder);
+        if (FAILED(hr))
+            return false;
+
+        ComPtr<IWICBitmapFrameDecode> frame;
+        hr = decoder->GetFrame(0, &frame);
+        if (FAILED(hr) || FAILED(frame->GetSize(&width, &height)))
+            return false;
+
+        return width > 0 && height > 0 && width <= 8192 && height <= 8192;
+    }
+
+    std::wstring TrimHtmlWhitespace(std::wstring value)
+    {
+        const size_t first = value.find_first_not_of(L" \\t\\r\\n");
+        if (first == std::wstring::npos)
+            return {};
+        const size_t last = value.find_last_not_of(L" \\t\\r\\n");
+        return value.substr(first, last - first + 1);
+    }
+
+
+    std::wstring LowerHtml(std::wstring value)
+    {
+        std::transform(
+            value.begin(), value.end(), value.begin(),
+            [](wchar_t c)
+            {
+                return static_cast<wchar_t>(towlower(c));
+            });
+        return value;
+    }
+
+    std::wstring GetHtmlAttribute(
+        const std::wstring& tag,
+        const std::wstring& attribute)
+    {
+        const std::wstring lower = LowerHtml(tag);
+        const std::wstring key = LowerHtml(attribute);
+        size_t p = 0;
+
+        while ((p = lower.find(key, p)) != std::wstring::npos)
+        {
+            const bool leftBoundary =
+                p == 0 || iswspace(lower[p - 1]) ||
+                lower[p - 1] == L'<';
+
+            size_t q = p + key.size();
+
+            while (q < lower.size() && iswspace(lower[q]))
+                ++q;
+
+            if (!leftBoundary || q >= lower.size() ||
+                lower[q] != L'=')
+            {
+                p += key.size();
+                continue;
+            }
+
+            ++q;
+            while (q < tag.size() && iswspace(tag[q]))
+                ++q;
+
+            if (q >= tag.size())
+                return {};
+
+            const wchar_t quote =
+                (tag[q] == L'\'' || tag[q] == L'"') ? tag[q++] : 0;
+
+            const size_t end = quote
+                ? tag.find(quote, q)
+                : tag.find_first_of(L" \t\r\n>", q);
+
+            return tag.substr(
+                q, (end == std::wstring::npos ? tag.size() : end) - q);
+        }
+
+        return {};
+    }
+
+
+    std::wstring GetCssProperty(const std::wstring& tag, const wchar_t* property)
+    {
+        const std::wstring style = GetHtmlAttribute(tag, L"style");
+        const std::wstring lower = LowerHtml(style);
+        const std::wstring key = std::wstring(property) + L":";
+        size_t pos = 0;
+
+        while ((pos = lower.find(key, pos)) != std::wstring::npos)
+        {
+            if (pos != 0 && lower[pos - 1] != L';' &&
+                !iswspace(lower[pos - 1]))
+            {
+                pos += key.size();
+                continue;
+            }
+
+            const size_t valueStart = pos + key.size();
+            size_t valueEnd = style.find(L';', valueStart);
+            if (valueEnd == std::wstring::npos)
+                valueEnd = style.size();
+            return TrimHtmlWhitespace(style.substr(valueStart, valueEnd - valueStart));
+        }
+        return {};
+    }
+
+    struct ParsedLength
+    {
+        bool valid = false;
+        bool isPercent = false;
+        double value = 0.0;
+    };
+
+    ParsedLength ParseImageLength(const std::wstring& raw)
+    {
+        ParsedLength result;
+        const std::wstring value = TrimHtmlWhitespace(LowerHtml(raw));
+        if (value.empty() || value == L"auto" || value == L"inherit" ||
+            value == L"initial" || value == L"unset")
+            return result;
+
+        wchar_t* end = nullptr;
+        const double number = wcstod(value.c_str(), &end);
+        if (end == value.c_str() || !(number > 0.0) || number > 100000.0)
+            return result;
+
+        while (*end && iswspace(*end))
+            ++end;
+
+        std::wstring unit(end);
+        unit = TrimHtmlWhitespace(unit);
+
+        double twips = 0.0;
+        if (unit.empty() || unit == L"px")
+            twips = number * 15.0;
+        else if (unit == L"pt")
+            twips = number * 20.0;
+        else if (unit == L"in")
+            twips = number * 1440.0;
+        else if (unit == L"cm")
+            twips = number * (1440.0 / 2.54);
+        else if (unit == L"mm")
+            twips = number * (1440.0 / 25.4);
+        else if (unit == L"%")
+        {
+            result.valid = true;
+            result.isPercent = true;
+            result.value = number;
+            return result;
+        }
+        else
+            return result;
+
+        result.valid = twips > 0.0;
+        result.value = twips;
+        return result;
+    }
+
+    ImageDisplaySize ComputeImageDisplaySize(
+        const std::wstring& tag,
+        UINT intrinsicWidth,
+        UINT intrinsicHeight,
+        int lineWidthTwips)
+    {
+        // A zero/negative line width means that the caller could not provide
+        // a reliable text-area width. Use a conservative page-text-width guess.
+        const int guessedLineWidth = 9360; // 6.5 inches
+        const int availableWidth = lineWidthTwips > 0
+            ? lineWidthTwips : guessedLineWidth;
+
+        std::wstring widthText = GetCssProperty(tag, L"width");
+        std::wstring heightText = GetCssProperty(tag, L"height");
+
+        // CSS wins when present; otherwise HTML width/height attributes are
+        // interpreted as CSS pixels, as browsers generally do for legacy HTML.
+        if (widthText.empty())
+            widthText = GetHtmlAttribute(tag, L"width");
+        if (heightText.empty())
+            heightText = GetHtmlAttribute(tag, L"height");
+
+        ParsedLength width = ParseImageLength(widthText);
+        ParsedLength height = ParseImageLength(heightText);
+        // Percentage heights have no useful reference in this converter;
+        // ignore them and preserve the intrinsic aspect ratio instead.
+        if (height.isPercent)
+            height.valid = false;
+
+        const double aspect = intrinsicHeight
+            ? static_cast<double>(intrinsicWidth) / intrinsicHeight : 1.0;
+        double w = static_cast<double>(intrinsicWidth) * 15.0;
+        double h = static_cast<double>(intrinsicHeight) * 15.0;
+
+        if (width.valid)
+            w = width.isPercent
+                ? availableWidth * width.value / 100.0
+                : width.value;
+
+        if (height.valid && !height.isPercent)
+            h = height.value;
+
+        if (width.valid && !height.valid)
+            h = w / aspect;
+        else if (!width.valid && height.valid)
+            w = h * aspect;
+        else if (width.valid && height.valid)
+        {
+            // Explicit width and height are both respected; this intentionally
+            // allows HTML that explicitly requests a distorted aspect ratio.
+        }
+
+        if (!(w > 0.0) || !(h > 0.0))
+        {
+            w = std::min<double>(availableWidth, 3600.0);
+            h = w / aspect;
+        }
+
+        // Keep unconstrained/oversized images within a useful display box.
+        // Explicit dimensions are also capped to avoid overflowing the editor.
+        const double maxWidth = (std::max)(720.0, static_cast<double>(availableWidth));
+        const double maxHeight = 12960.0; // 9 inches
+        const double scale = (std::min)(
+            1.0,
+            (std::min)(maxWidth / w, maxHeight / h));
+
+        w *= scale;
+        h *= scale;
+
+        ImageDisplaySize result;
+        result.widthTwips = static_cast<int>(std::clamp(w, 1.0, 1000000.0));
+        result.heightTwips = static_cast<int>(std::clamp(h, 1.0, 1000000.0));
+        return result;
+    }
+
     bool AppendBitmapRtf(
         std::string& rtf,
-        const std::vector<BYTE>& encoded)
+        const std::vector<BYTE>& encoded,
+        const std::wstring& tag,
+        int lineWidthTwips)
     {
         using Microsoft::WRL::ComPtr;
 
@@ -654,16 +928,12 @@ namespace
         bih.biCompression = BI_RGB;
         bih.biSizeImage = pixelBytes;
 
-        // RTF dimensions are expressed in twips (1/1440 inch).
-        const int picwgoal = static_cast<int>(
-            std::min<uint64_t>(
-                static_cast<uint64_t>(width) * 15,
-                1000000));
-
-        const int pichgoal = static_cast<int>(
-            std::min<uint64_t>(
-                static_cast<uint64_t>(height) * 15,
-                1000000));
+        // RTF dimensions are expressed in twips (1/1440 inch). Preserve
+        // the encoded pixel resolution and change only its display dimensions.
+        const ImageDisplaySize display =
+            ComputeImageDisplaySize(tag, width, height, lineWidthTwips);
+        const int picwgoal = display.widthTwips;
+        const int pichgoal = display.heightTwips;
 
         rtf += "{\\pict\\dibitmap0";
         rtf += "\\picw" + std::to_string(width);
@@ -769,65 +1039,7 @@ namespace
         return result;
     }
 
-    std::wstring LowerHtml(std::wstring value)
-    {
-        std::transform(
-            value.begin(), value.end(), value.begin(),
-            [](wchar_t c)
-            {
-                return static_cast<wchar_t>(towlower(c));
-            });
-        return value;
-    }
-
-    std::wstring GetHtmlAttribute(
-        const std::wstring& tag,
-        const std::wstring& attribute)
-    {
-        const std::wstring lower = LowerHtml(tag);
-        const std::wstring key = LowerHtml(attribute);
-        size_t p = 0;
-
-        while ((p = lower.find(key, p)) != std::wstring::npos)
-        {
-            const bool leftBoundary =
-                p == 0 || iswspace(lower[p - 1]) ||
-                lower[p - 1] == L'<';
-
-            size_t q = p + key.size();
-
-            while (q < lower.size() && iswspace(lower[q]))
-                ++q;
-
-            if (!leftBoundary || q >= lower.size() ||
-                lower[q] != L'=')
-            {
-                p += key.size();
-                continue;
-            }
-
-            ++q;
-            while (q < tag.size() && iswspace(tag[q]))
-                ++q;
-
-            if (q >= tag.size())
-                return {};
-
-            const wchar_t quote =
-                (tag[q] == L'\'' || tag[q] == L'"') ? tag[q++] : 0;
-
-            const size_t end = quote
-                ? tag.find(quote, q)
-                : tag.find_first_of(L" \t\r\n>", q);
-
-            return tag.substr(
-                q, (end == std::wstring::npos ? tag.size() : end) - q);
-        }
-
-        return {};
-    }
-
-    static size_t FindTagEnd(
+    size_t FindTagEnd(
         const std::wstring& html,
         size_t start)
     {
@@ -974,7 +1186,8 @@ namespace
     bool AppendRemoteRtfImage(
         std::string& rtf,
         const std::wstring& tag,
-        const HtmlImageCache& imageCache)
+        const HtmlImageCache& imageCache,
+        int lineWidthTwips)
     {
         const std::wstring src = GetHtmlAttribute(tag, L"src");
 
@@ -986,7 +1199,7 @@ namespace
             return false;
 
         // Keep the original, known-working DIB-to-RTF serialization.
-        return AppendBitmapRtf(rtf, it->second);
+        return AppendBitmapRtf(rtf, it->second, tag, lineWidthTwips);
     }
 
     bool DecodeBase64(
@@ -1036,7 +1249,8 @@ namespace
 
     bool AppendRtfImage(
         std::string& rtf,
-        const std::wstring& tag)
+        const std::wstring& tag,
+        int lineWidthTwips)
     {
         const std::wstring src = GetHtmlAttribute(tag, L"src");
         const std::wstring lowerSrc = LowerHtml(src);
@@ -1079,26 +1293,15 @@ namespace
                 return false;
         }
 
-        // RTF picture dimensions are expressed in twips.
-        // Use conservative default dimensions; Rich Edit can scale the
-        // picture to fit the available line width.
-        int widthTwips = 3600;
-        int heightTwips = 2400;
+        UINT intrinsicWidth = 0;
+        UINT intrinsicHeight = 0;
+        if (!GetEncodedImageSize(bytes, intrinsicWidth, intrinsicHeight))
+            return false;
 
-        auto parseDimension = [](const std::wstring& value, int& twips)
-            {
-                if (value.empty())
-                    return;
-
-                wchar_t* end = nullptr;
-                const long pixels = wcstol(value.c_str(), &end, 10);
-
-                if (end != value.c_str() && pixels > 0 && pixels <= 4000)
-                    twips = static_cast<int>(pixels * 15);
-            };
-
-        parseDimension(GetHtmlAttribute(tag, L"width"), widthTwips);
-        parseDimension(GetHtmlAttribute(tag, L"height"), heightTwips);
+        const ImageDisplaySize display = ComputeImageDisplaySize(
+            tag, intrinsicWidth, intrinsicHeight, lineWidthTwips);
+        const int widthTwips = display.widthTwips;
+        const int heightTwips = display.heightTwips;
 
         rtf += "{\\pict";
         rtf += isPng ? "\\pngblip" : "\\jpegblip";
@@ -1174,7 +1377,10 @@ namespace
         rtf += "}}}";
     }
 
-    std::string HtmlToRtf(const std::wstring& html, const HtmlImageCache& imageCache)
+    std::string HtmlToRtf(
+        const std::wstring& html,
+        const HtmlImageCache& imageCache,
+        int lineWidthTwips)
     {
         std::string rtf =
             "{\\rtf1\\ansi\\deff0"
@@ -1307,8 +1513,8 @@ namespace
                 // relocate pictures or alter inline spacing.
                 std::string imageRtf;
                 const bool inserted =
-                    AppendRtfImage(imageRtf, tag) ||
-                    AppendRemoteRtfImage(imageRtf, tag, imageCache);
+                    AppendRtfImage(imageRtf, tag, lineWidthTwips) ||
+                    AppendRemoteRtfImage(imageRtf, tag, imageCache, lineWidthTwips);
 
                 if (inserted)
                 {
@@ -1567,12 +1773,45 @@ namespace
         return 0;
     }
 
-} // namespace
+    int GuessRichEditLineWidthTwips(HWND hwndRichEdit)
+    {
+        RECT rect = {};
+        // EM_GETRECT returns the formatting rectangle in client pixels.
+        ::SendMessage(hwndRichEdit, EM_GETRECT, 0,
+            reinterpret_cast<LPARAM>(&rect));
+
+        // Some Rich Edit implementations may return an empty formatting
+        // rectangle before layout; use the client rectangle in that case.
+        if (rect.right <= rect.left || rect.bottom <= rect.top)
+        {
+            if (!::GetClientRect(hwndRichEdit, &rect))
+                return 0;
+        }
+
+        const int widthPixels = rect.right - rect.left;
+        if (widthPixels <= 0)
+            return 0;
+
+        UINT dpi = 96;
+        HDC dc = ::GetDC(hwndRichEdit);
+        if (dc)
+        {
+            const int measuredDpi = ::GetDeviceCaps(dc, LOGPIXELSX);
+            if (measuredDpi > 0)
+                dpi = static_cast<UINT>(measuredDpi);
+            ::ReleaseDC(hwndRichEdit, dc);
+        }
+
+        return static_cast<int>(
+            static_cast<int64_t>(widthPixels) * 1440 / dpi);
+    }
+}
 
 HRESULT PasteHtmlIntoRichEdit(
     HWND hwndRichEdit,
     LPDATAOBJECT dataObject,
-    CLIPFORMAT htmlFormat)
+    CLIPFORMAT htmlFormat,
+    int lineWidthTwips)
 {
     if (!::IsWindow(hwndRichEdit) || !dataObject || !htmlFormat)
         return E_INVALIDARG;
@@ -1582,10 +1821,13 @@ HRESULT PasteHtmlIntoRichEdit(
     if (!ReadHtmlClipboard(dataObject, htmlFormat, html))
         return DV_E_FORMATETC;
 
-    // Fetch remote images concurrently before constructing the RTF.
-    // The original bitmap serialization is intentionally unchanged.
+    // <= 0 asks us to infer the available line width from the Rich Edit
+    // formatting rectangle. If that fails, image sizing uses a safe guess.
+    if (lineWidthTwips <= 0)
+        lineWidthTwips = GuessRichEditLineWidthTwips(hwndRichEdit);
+
     const HtmlImageCache imageCache = PrefetchRemoteImages(html);
-    const std::string rtf = HtmlToRtf(html, imageCache);
+    const std::string rtf = HtmlToRtf(html, imageCache, lineWidthTwips);
 
     if (rtf.empty())
         return E_FAIL;
@@ -1612,4 +1854,13 @@ HRESULT PasteHtmlIntoRichEdit(
         return E_FAIL;
 
     return S_OK;
+}
+
+
+HRESULT PasteHtmlIntoRichEdit(
+    HWND hwndRichEdit,
+    LPDATAOBJECT dataObject,
+    CLIPFORMAT htmlFormat)
+{
+    return PasteHtmlIntoRichEdit(hwndRichEdit, dataObject, htmlFormat, 0);
 }
