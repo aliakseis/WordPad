@@ -60,7 +60,8 @@ BEGIN
     "#include ""afxprint.rc""\t// printing/print preview resources\r\n"
     "#include ""afxolecl.rc""\t// OLE container resources\r\n"
     "#include ""afxolesv.rc""\t// OLE server resources\r\n"
-    "\r\0"
+    "#include ""afxribbon.rc""\r\n"
+    "\0"
 END
 
 #endif    // APSTUDIO_INVOKED
@@ -1080,7 +1081,7 @@ END
 #include "afxprint.rc"	// printing/print preview resources
 #include "afxolecl.rc"	// OLE container resources
 #include "afxolesv.rc"	// OLE server resources
-
+#include "afxribbon.rc"
 
 /////////////////////////////////////////////////////////////////////////////
 #endif    // not APSTUDIO_INVOKED
