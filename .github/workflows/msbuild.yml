@@ -26,11 +26,7 @@ jobs:
 
       - name: Build WordPad.sln
         run: |
-          msbuild WordPad.sln ^
-            /m ^
-            /p:Configuration="${{ matrix.configuration }}" ^
-            /p:Platform="${{ matrix.platform }}" ^
-            /verbosity:minimal
+          msbuild WordPad.sln /m /p:Configuration="${{ matrix.configuration }}" /p:Platform="${{ matrix.platform }}" /verbosity:minimal
 
       - name: Upload binaries
         uses: actions/upload-artifact@v4
