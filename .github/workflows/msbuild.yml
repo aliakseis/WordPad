@@ -13,9 +13,11 @@ jobs:
         include:
           - configuration: "Unicode Release Static"
             platform: "Win32"
+            artifact: "WordPad-Win32"
 
           - configuration: "Unicode Release Static"
             platform: "x64"
+            artifact: "WordPad-x64"
 
     steps:
       - name: Checkout
