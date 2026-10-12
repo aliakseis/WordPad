@@ -1,0 +1,41 @@
+name: MSBuild
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - configuration: "Unicode Release Static"
+            platform: "Win32"
+
+          - configuration: "Unicode Release Static"
+            platform: "x64"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build WordPad.sln
+        run: |
+          msbuild WordPad.sln ^
+            /m ^
+            /p:Configuration="${{ matrix.configuration }}" ^
+            /p:Platform="${{ matrix.platform }}" ^
+            /verbosity:minimal
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            **/*.exe
+            **/*.dll
