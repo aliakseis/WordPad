@@ -4,6 +4,8 @@ A feature-rich **Microsoft Foundation Classes (MFC)** word processor demonstrati
 
 Originally based on the Microsoft MFC WordPad sample, this project serves as both a fully functional document editor and a comprehensive reference implementation for building professional Windows desktop applications with MFC.
 
+**Functionality has been expanded to support the insertion of HTML content.**
+
 ---
 
 ## Overview
