@@ -31,6 +31,8 @@
 
 #include "multconv.h"
 
+#include "DocReader.h"
+
 #ifdef _DEBUG
 #undef THIS_FILE
 static char BASED_CODE THIS_FILE[] = __FILE__;
@@ -431,11 +433,22 @@ CWordPadView* CWordPadDoc::GetView()
 
 CFile* CWordPadDoc::GetFile(LPCTSTR pszPathName, UINT nOpenFlags, CFileException* pException)
 {
-	CTrackFile* pFile = NULL;
-	CFrameWnd* pWnd = GetView()->GetParentFrame();
-
 	// if writing use current doc type otherwise use new doc type
 	int nType = (nOpenFlags & CFile::modeReadWrite) ? m_nDocType : m_nNewDocType;
+
+    if (nType == RD_WINWORD2)
+    {
+        std::vector<std::uint8_t> rtf;
+        auto result = docreader::ConvertToRtf(pszPathName, rtf);
+        if (!result.success)
+        {
+            return NULL;
+        }
+        return new CVectorMemFile(std::move(rtf));
+    }
+
+    CTrackFile* pFile = NULL;
+    CFrameWnd* pWnd = GetView()->GetParentFrame();
 
 #ifdef CONVERTERS
 	ScanForConverters();

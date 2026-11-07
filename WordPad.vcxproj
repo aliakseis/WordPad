@@ -1260,6 +1260,7 @@
     <ClCompile Include="datedial.cpp" />
     <ClCompile Include="ddxm.cpp" />
     <ClCompile Include="docopt.cpp" />
+    <ClCompile Include="DocReader.cpp" />
     <ClCompile Include="doctype.cpp" />
     <ClCompile Include="filenewd.cpp" />
     <ClCompile Include="formatba.cpp" />
@@ -1274,6 +1275,7 @@
     <ClCompile Include="optionsh.cpp" />
     <ClCompile Include="pageset.cpp" />
     <ClCompile Include="PasteHtmlIntoRichEdit.cpp" />
+    <ClCompile Include="RichEditStream.cpp" />
     <ClCompile Include="ruler.cpp" />
     <ClCompile Include="srvritem.cpp" />
     <ClCompile Include="stdafx.cpp">
@@ -1317,6 +1319,7 @@
     <ClInclude Include="datedial.h" />
     <ClInclude Include="ddxm.h" />
     <ClInclude Include="docopt.h" />
+    <ClInclude Include="DocReader.h" />
     <ClInclude Include="doctype.h" />
     <ClInclude Include="filenewd.h" />
     <ClInclude Include="formatba.h" />
@@ -1334,6 +1337,7 @@
     <ClInclude Include="pageset.h" />
     <ClInclude Include="PasteHtmlIntoRichEdit.h" />
     <ClInclude Include="Resource.h" />
+    <ClInclude Include="RichEditStream.h" />
     <ClInclude Include="ruler.h" />
     <ClInclude Include="srvritem.h" />
     <ClInclude Include="stdafx.h" />
