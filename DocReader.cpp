@@ -1,6 +1,7 @@
 #include "stdafx.h"
 
 #include "DocReader.h"
+#include "ComUsageScope.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -630,20 +631,22 @@ Result ConvertToRtf(const std::wstring& fileName,
     Result result;
     rtf.clear();
 
-    const HRESULT initHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    const bool uninitialize = SUCCEEDED(initHr);
-    if (FAILED(initHr) && initHr != RPC_E_CHANGED_MODE)
-    {
-        result.error = L"CoInitializeEx failed.";
-        return result;
-    }
+    //const HRESULT initHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    //const bool uninitialize = SUCCEEDED(initHr);
+    //if (FAILED(initHr) && initHr != RPC_E_CHANGED_MODE)
+    //{
+    //    result.error = L"CoInitializeEx failed.";
+    //    return result;
+    //}
+
+    CComUsageScope scope;
 
     Storage storage;
     HRESULT hr = StgOpenStorage(fileName.c_str(), nullptr,
         STGM_READ | STGM_SHARE_DENY_WRITE, nullptr, 0, &storage.p);
     if (FAILED(hr))
     {
-        if (uninitialize) CoUninitialize();
+        //if (uninitialize) CoUninitialize();
         result.error = L"Cannot open the DOC compound file (StgOpenStorage failed).";
         return result;
     }
@@ -658,7 +661,7 @@ Result ConvertToRtf(const std::wstring& fileName,
     Stream wordStream, tableStream;
     if (FAILED(openStream(L"WordDocument", &wordStream.p)))
     {
-        if (uninitialize) CoUninitialize();
+        //if (uninitialize) CoUninitialize();
         result.error = L"The OLE file does not contain a WordDocument stream.";
         return result;
     }
@@ -666,7 +669,7 @@ Result ConvertToRtf(const std::wstring& fileName,
     std::uint64_t wordSize = 0;
     if (!GetStreamSize(wordStream.p, wordSize) || wordSize > options.maxStreamBytes)
     {
-        if (uninitialize) CoUninitialize();
+        //if (uninitialize) CoUninitialize();
         result.error = L"WordDocument stream is invalid or exceeds the configured size limit.";
         return result;
     }
@@ -674,7 +677,7 @@ Result ConvertToRtf(const std::wstring& fileName,
     std::vector<std::uint8_t> word;
     if (!ReadVector(wordStream.p, 0, wordSize, options.maxStreamBytes, word))
     {
-        if (uninitialize) CoUninitialize();
+        //if (uninitialize) CoUninitialize();
         result.error = L"Failed to read WordDocument stream.";
         return result;
     }
@@ -682,14 +685,14 @@ Result ConvertToRtf(const std::wstring& fileName,
     FibInfo fib;
     if (!ParseFib(word, fib, result.error))
     {
-        if (uninitialize) CoUninitialize();
+        //if (uninitialize) CoUninitialize();
         return result;
     }
 
     const wchar_t* tableName = fib.table1 ? L"1Table" : L"0Table";
     if (FAILED(openStream(tableName, &tableStream.p)))
     {
-        if (uninitialize) CoUninitialize();
+        //if (uninitialize) CoUninitialize();
         result.error = L"Cannot open the table stream selected by the FIB.";
         return result;
     }
@@ -697,7 +700,7 @@ Result ConvertToRtf(const std::wstring& fileName,
     std::uint64_t tableSize = 0;
     if (!GetStreamSize(tableStream.p, tableSize) || tableSize > options.maxStreamBytes)
     {
-        if (uninitialize) CoUninitialize();
+        //if (uninitialize) CoUninitialize();
         result.error = L"Table stream is invalid or exceeds the configured size limit.";
         return result;
     }
@@ -705,7 +708,7 @@ Result ConvertToRtf(const std::wstring& fileName,
     std::vector<std::uint8_t> table;
     if (!ReadVector(tableStream.p, 0, tableSize, options.maxStreamBytes, table))
     {
-        if (uninitialize) CoUninitialize();
+        //if (uninitialize) CoUninitialize();
         result.error = L"Failed to read table stream.";
         return result;
     }
@@ -722,7 +725,7 @@ Result ConvertToRtf(const std::wstring& fileName,
     std::vector<Piece> pieces;
     if (!ParsePieceTable(table, fib.fcClx, fib.lcbClx, pieces, result.error))
     {
-        if (uninitialize) CoUninitialize();
+        //if (uninitialize) CoUninitialize();
         return result;
     }
 
@@ -735,7 +738,7 @@ Result ConvertToRtf(const std::wstring& fileName,
         if (std::uint64_t(piece.fc) + byteLength > word.size())
         {
             result.error = L"A text piece points outside the WordDocument stream.";
-            if (uninitialize) CoUninitialize();
+            //if (uninitialize) CoUninitialize();
             return result;
         }
 
@@ -747,7 +750,7 @@ Result ConvertToRtf(const std::wstring& fileName,
         if (!ok)
         {
             result.error = L"Failed to decode a text piece.";
-            if (uninitialize) CoUninitialize();
+            //if (uninitialize) CoUninitialize();
             return result;
         }
     }
@@ -782,7 +785,7 @@ Result ConvertToRtf(const std::wstring& fileName,
     if (!WideToUtf8Bytes(rtfText, rtf))
     {
         result.error = L"Failed to encode generated RTF.";
-        if (uninitialize) CoUninitialize();
+        //if (uninitialize) CoUninitialize();
         return result;
     }
 
@@ -794,8 +797,8 @@ Result ConvertToRtf(const std::wstring& fileName,
         result.warnings.push_back(L"Some inline pictures could not be decoded. This implementation currently embeds PNG and JPEG picture payloads; floating pictures and other OfficeArt formats are not handled.");
     result.warnings.push_back(L"Character/paragraph formatting, floating pictures, and complex OfficeArt objects are not implemented yet.");
 
-    if (uninitialize)
-        CoUninitialize();
+    //if (uninitialize)
+    //    CoUninitialize();
     return result;
 }
 
