@@ -442,6 +442,8 @@ CFile* CWordPadDoc::GetFile(LPCTSTR pszPathName, UINT nOpenFlags, CFileException
         auto result = docreader::ConvertToRtf(pszPathName, rtf);
         if (!result.success)
         {
+            if (!result.error.empty())
+                AfxMessageBox(result.error.c_str());
             return NULL;
         }
         return new CVectorMemFile(std::move(rtf));
