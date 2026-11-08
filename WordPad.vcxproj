@@ -98,6 +98,9 @@
     </ProjectConfiguration>
   </ItemGroup>
   <PropertyGroup Label="Globals">
+    <VcpkgEnableManifest>true</VcpkgEnableManifest>
+    <VcpkgManifestInstalledBaseDir>$(MSBuildProjectDirectory)\vcpkg_installed\</VcpkgManifestInstalledBaseDir>
+    <VcpkgApplocalDeps>false</VcpkgApplocalDeps>
     <TargetName>WordPad</TargetName>
     <ProjectGUID>{66F9A117-DACA-4D34-8CB8-4FC1D4211C5C}</ProjectGUID>
     <RootNamespace>WordPad</RootNamespace>
@@ -1350,6 +1353,7 @@
     <ClInclude Include="wordpvw.h" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="vcpkg.json" />
     <None Include="ReadMe.htm">
       <DeploymentContent>true</DeploymentContent>
     </None>
@@ -1384,7 +1388,41 @@
   <ItemGroup>
     <ResourceCompile Include="wordpad.rc" />
   </ItemGroup>
+  <PropertyGroup>
+    <!-- Build zlib as a static library in every configuration. Match its CRT
+         linkage to the MFC configuration to avoid LNK2038 mismatches. -->
+    <VcpkgUseStatic>true</VcpkgUseStatic>
+    <VcpkgConfiguration Condition="$([System.String]::Copy('$(Configuration)').Contains('Debug'))">Debug</VcpkgConfiguration>
+    <VcpkgConfiguration Condition="!$([System.String]::Copy('$(Configuration)').Contains('Debug'))">Release</VcpkgConfiguration>
+    <VcpkgUseMD Condition="'$(UseOfMfc)'=='Static'">false</VcpkgUseMD>
+    <VcpkgUseMD Condition="'$(UseOfMfc)'!='Static'">true</VcpkgUseMD>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <Link>
+      <AdditionalDependencies>docxzlib.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(IntDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+    </Link>
+  </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Target Name="PrepareDocxZlib" BeforeTargets="Link">
+    <!-- Resolve the static library name from the selected vcpkg zlib package.
+         This accommodates the different output names used by zlib releases. -->
+    <PropertyGroup>
+      <_DocxZlibInstallDir Condition="'$(VcpkgInstalledDir)'!=''">$(VcpkgInstalledDir)</_DocxZlibInstallDir>
+      <_DocxZlibInstallDir Condition="'$(VcpkgInstalledDir)'==''">$(VcpkgManifestInstalledBaseDir)$(VcpkgTriplet)\$(VcpkgTriplet)\</_DocxZlibInstallDir>
+      <_DocxZlibLibrary Condition="'$(VcpkgConfiguration)'=='Debug' and Exists('$(_DocxZlibInstallDir)debug\lib\zlibstaticd.lib')">$(_DocxZlibInstallDir)debug\lib\zlibstaticd.lib</_DocxZlibLibrary>
+      <_DocxZlibLibrary Condition="'$(VcpkgConfiguration)'=='Debug' and '$(_DocxZlibLibrary)'=='' and Exists('$(_DocxZlibInstallDir)debug\lib\zlibd.lib')">$(_DocxZlibInstallDir)debug\lib\zlibd.lib</_DocxZlibLibrary>
+      <_DocxZlibLibrary Condition="'$(VcpkgConfiguration)'=='Debug' and '$(_DocxZlibLibrary)'=='' and Exists('$(_DocxZlibInstallDir)debug\lib\zsd.lib')">$(_DocxZlibInstallDir)debug\lib\zsd.lib</_DocxZlibLibrary>
+      <_DocxZlibLibrary Condition="'$(VcpkgConfiguration)'=='Debug' and '$(_DocxZlibLibrary)'=='' and Exists('$(_DocxZlibInstallDir)debug\lib\zd.lib')">$(_DocxZlibInstallDir)debug\lib\zd.lib</_DocxZlibLibrary>
+      <_DocxZlibLibrary Condition="'$(VcpkgConfiguration)'!='Debug' and Exists('$(_DocxZlibInstallDir)lib\zlibstatic.lib')">$(_DocxZlibInstallDir)lib\zlibstatic.lib</_DocxZlibLibrary>
+      <_DocxZlibLibrary Condition="'$(VcpkgConfiguration)'!='Debug' and '$(_DocxZlibLibrary)'=='' and Exists('$(_DocxZlibInstallDir)lib\zlib.lib')">$(_DocxZlibInstallDir)lib\zlib.lib</_DocxZlibLibrary>
+      <_DocxZlibLibrary Condition="'$(VcpkgConfiguration)'!='Debug' and '$(_DocxZlibLibrary)'=='' and Exists('$(_DocxZlibInstallDir)lib\zs.lib')">$(_DocxZlibInstallDir)lib\zs.lib</_DocxZlibLibrary>
+      <_DocxZlibLibrary Condition="'$(VcpkgConfiguration)'!='Debug' and '$(_DocxZlibLibrary)'=='' and Exists('$(_DocxZlibInstallDir)lib\z.lib')">$(_DocxZlibInstallDir)lib\z.lib</_DocxZlibLibrary>
+    </PropertyGroup>
+    <Error Condition="'$(_DocxZlibLibrary)'==''" Text="Could not find the static zlib library in $(_DocxZlibInstallDir). Check that vcpkg manifest installation succeeded." />
+    <MakeDir Directories="$(IntDir)" />
+    <Copy SourceFiles="$(_DocxZlibLibrary)" DestinationFiles="$(IntDir)docxzlib.lib" SkipUnchangedFiles="true" />
+  </Target>
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
 </Project>

@@ -2,6 +2,7 @@
 #include "DocxReader.h"
 
 #include <windows.h>
+#include <atlbase.h>
 #include <msxml6.h>
 #include <algorithm>
 #include <cwctype>
@@ -13,146 +14,404 @@
 #include <sstream>
 #include <utility>
 #include <vector>
+#include <thread>
+#include <exception>
+#include <set>
+#include <zlib.h>
 
 #pragma comment(lib, "msxml6.lib")
 
 namespace docxreader {
 namespace {
 
-struct DispatchPtr {
-    IDispatch* p = nullptr;
-    ~DispatchPtr() { if (p) p->Release(); }
-    DispatchPtr() = default;
-    DispatchPtr(const DispatchPtr&) = delete;
-    DispatchPtr& operator=(const DispatchPtr&) = delete;
-    IDispatch** put() { if (p) { p->Release(); p = nullptr; } return &p; }
+// MSXML interfaces are owned by ATL smart pointers. ZIP extraction uses
+// zlib directly; no Shell Automation, tar.exe or external extractor is needed.
+
+// DOCX import runs on a dedicated STA because MSXML is a COM component.
+// S_FALSE is success and must be balanced by CoUninitialize;
+// RPC_E_CHANGED_MODE is deliberately treated as failure.
+class ComApartment {
+public:
+    ComApartment() : hr_(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)),
+                     uninitialize_(SUCCEEDED(hr_)) {}
+    ~ComApartment() { if (uninitialize_) CoUninitialize(); }
+    bool usable() const { return SUCCEEDED(hr_); }
+    HRESULT result() const { return hr_; }
+private:
+    HRESULT hr_;
+    bool uninitialize_;
 };
-struct XmlDoc {
-    IXMLDOMDocument2* p = nullptr;
-    ~XmlDoc() { if (p) p->Release(); }
-    IXMLDOMDocument2** put() { return &p; }
-};
-HRESULT Invoke(IDispatch* object, const wchar_t* name, WORD flags,
-               VARIANT* args, UINT count, VARIANT* result)
+
+void RemoveTree(const std::wstring& dir);
+
+static std::uint16_t ReadLe16(const std::uint8_t* p)
 {
-    if (!object) return E_POINTER;
-    LPOLESTR member = const_cast<LPOLESTR>(name);
-    DISPID id = DISPID_UNKNOWN;
-    HRESULT hr = object->GetIDsOfNames(IID_NULL, &member, 1, LOCALE_USER_DEFAULT, &id);
-    if (FAILED(hr)) return hr;
-    DISPPARAMS params{};
-    params.rgvarg = args;
-    params.cArgs = count;
-    EXCEPINFO ex{};
-    UINT argError = 0;
-    return object->Invoke(id, IID_NULL, LOCALE_USER_DEFAULT, flags, &params,
-                          result, &ex, &argError);
+    return static_cast<std::uint16_t>(p[0] | (static_cast<unsigned>(p[1]) << 8));
 }
 
-bool GetDispatch(IDispatch* object, const wchar_t* name, IDispatch** value)
+static std::uint32_t ReadLe32(const std::uint8_t* p)
 {
-    VARIANT v; VariantInit(&v);
-    HRESULT hr = Invoke(object, name, DISPATCH_PROPERTYGET, nullptr, 0, &v);
-    if (FAILED(hr) || v.vt != VT_DISPATCH || !v.pdispVal) {
-        VariantClear(&v); VariantInit(&v);
-        hr = Invoke(object, name, DISPATCH_METHOD, nullptr, 0, &v);
-    }
-    if (SUCCEEDED(hr) && v.vt == VT_DISPATCH && v.pdispVal) {
-        *value = v.pdispVal; v.pdispVal = nullptr; VariantClear(&v); return true;
-    }
-    VariantClear(&v); return false;
+    return static_cast<std::uint32_t>(p[0]) |
+        (static_cast<std::uint32_t>(p[1]) << 8) |
+        (static_cast<std::uint32_t>(p[2]) << 16) |
+        (static_cast<std::uint32_t>(p[3]) << 24);
 }
 
-bool GetLong(IDispatch* object, const wchar_t* name, long& value)
+bool ReadWholeFile(const std::wstring& path, std::vector<std::uint8_t>& bytes,
+                   std::uint64_t maxBytes)
 {
-    VARIANT v; VariantInit(&v);
-    HRESULT hr = Invoke(object, name, DISPATCH_PROPERTYGET, nullptr, 0, &v);
-    if (SUCCEEDED(hr)) hr = VariantChangeType(&v, &v, 0, VT_I4);
-    if (SUCCEEDED(hr)) value = v.lVal;
-    VariantClear(&v); return SUCCEEDED(hr);
-}
-
-bool GetBool(IDispatch* object, const wchar_t* name, bool& value)
-{
-    VARIANT v; VariantInit(&v);
-    HRESULT hr = Invoke(object, name, DISPATCH_PROPERTYGET, nullptr, 0, &v);
-    if (SUCCEEDED(hr)) hr = VariantChangeType(&v, &v, 0, VT_BOOL);
-    if (SUCCEEDED(hr)) value = v.boolVal != VARIANT_FALSE;
-    VariantClear(&v); return SUCCEEDED(hr);
-}
-
-bool GetItem(IDispatch* collection, long index, IDispatch** item)
-{
-    VARIANT arg; VariantInit(&arg); arg.vt = VT_I4; arg.lVal = index;
-    VARIANT v; VariantInit(&v);
-    HRESULT hr = Invoke(collection, L"Item", DISPATCH_PROPERTYGET, &arg, 1, &v);
-    if (FAILED(hr) || v.vt != VT_DISPATCH || !v.pdispVal) {
-        VariantClear(&v); VariantInit(&v);
-        hr = Invoke(collection, L"Item", DISPATCH_METHOD, &arg, 1, &v);
-    }
-    if (SUCCEEDED(hr) && v.vt == VT_DISPATCH && v.pdispVal) {
-        *item = v.pdispVal; v.pdispVal = nullptr; VariantClear(&v); return true;
-    }
-    VariantClear(&v); return false;
-}
-
-bool CountFiles(IDispatch* folder, unsigned long long& count, unsigned depth = 0)
-{
-    if (depth > 32) return false;
-    DispatchPtr items;
-    if (!GetDispatch(folder, L"Items", items.put())) return false;
-    long n = 0;
-    if (!GetLong(items.p, L"Count", n) || n < 0 || n > 100000) return false;
-    for (long i = 0; i < n; ++i) {
-        DispatchPtr item;
-        if (!GetItem(items.p, i, item.put())) return false;
-        bool isFolder = false;
-        if (!GetBool(item.p, L"IsFolder", isFolder)) return false;
-        if (isFolder) {
-            DispatchPtr child;
-            if (!GetDispatch(item.p, L"GetFolder", child.put()) ||
-                !CountFiles(child.p, count, depth + 1)) return false;
-        } else ++count;
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file) return false;
+    const std::streamoff size = file.tellg();
+    if (size < 0 || static_cast<std::uint64_t>(size) > maxBytes) return false;
+    bytes.resize(static_cast<size_t>(size));
+    file.seekg(0, std::ios::beg);
+    if (!bytes.empty()) {
+        file.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        if (file.gcount() != static_cast<std::streamsize>(bytes.size())) return false;
     }
     return true;
 }
 
-bool GetDiskTreeSize(const std::wstring& dir, unsigned long long& bytes, unsigned depth = 0)
+bool DecodeZipName(const std::string& name, bool utf8, std::wstring& decoded)
 {
-    if (depth > 32) return false;
-    std::wstring pattern = dir + L"\\*";
-    WIN32_FIND_DATAW fd{};
-    HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) return false;
-    do {
-        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
-        std::wstring path = dir + L"\\" + fd.cFileName;
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            if (!GetDiskTreeSize(path, bytes, depth + 1)) { FindClose(h); return false; }
-        } else {
-            bytes += (static_cast<unsigned long long>(fd.nFileSizeHigh) << 32) | fd.nFileSizeLow;
-            if (bytes > 512ull * 1024 * 1024) { FindClose(h); return false; }
+    if (name.empty() || name.size() > 4096) return false;
+    const UINT codePage = utf8 ? CP_UTF8 : 437;
+    const DWORD flags = utf8 ? MB_ERR_INVALID_CHARS : 0;
+    const int count = MultiByteToWideChar(codePage, flags, name.data(),
+                                           static_cast<int>(name.size()), nullptr, 0);
+    if (count <= 0) return false;
+    decoded.resize(static_cast<size_t>(count));
+    return MultiByteToWideChar(codePage, flags, name.data(),
+                               static_cast<int>(name.size()), &decoded[0], count) == count;
+}
+
+// Convert a ZIP path to a safe path relative to the extraction root. ZIP paths
+// are always package-relative; absolute paths, drive names, dot-dot segments,
+// alternate data streams and Windows-invalid path characters are rejected.
+bool NormalizeZipPath(std::wstring& path, bool& isDirectory)
+{
+    if (path.empty() || path[0] == L'/' || path[0] == L'\\') return false;
+    std::replace(path.begin(), path.end(), L'/', L'\\');
+    isDirectory = !path.empty() && path.back() == L'\\';
+    if (isDirectory) path.pop_back();
+    if (path.empty()) return false;
+
+    std::wstring normalized;
+    size_t pos = 0;
+    while (pos < path.size()) {
+        const size_t next = path.find(L'\\', pos);
+        const std::wstring part = path.substr(pos, next == std::wstring::npos ? next : next - pos);
+        if (part.empty() || part == L"." || part == L".." ||
+            part.back() == L'.' || part.back() == L' ')
+            return false;
+        std::wstring device = part.substr(0, part.find(L'.'));
+        std::transform(device.begin(), device.end(), device.begin(),
+                       [](wchar_t c) { return static_cast<wchar_t>(std::towupper(c)); });
+        if (device == L"CON" || device == L"PRN" || device == L"AUX" || device == L"NUL" ||
+            (device.size() == 4 && (device.compare(0, 3, L"COM") == 0 ||
+                                   device.compare(0, 3, L"LPT") == 0) &&
+             device[3] >= L'1' && device[3] <= L'9'))
+            return false;
+        for (wchar_t c : part) {
+            if (c < 32 || c == L':' || c == L'<' || c == L'>' || c == L'"' ||
+                c == L'|' || c == L'?' || c == L'*') return false;
         }
-    } while (FindNextFileW(h, &fd));
-    FindClose(h);
+        if (!normalized.empty()) normalized += L'\\';
+        normalized += part;
+        if (next == std::wstring::npos) break;
+        pos = next + 1;
+        if (pos == path.size()) return false;
+    }
+    if (normalized.size() > 32760) return false;
+    path.swap(normalized);
     return true;
 }
 
-bool CountDiskFiles(const std::wstring& dir, unsigned long long& count, unsigned depth = 0)
+bool EnsureDirectory(const std::wstring& root, const std::wstring& path)
 {
-    if (depth > 32) return false;
-    std::wstring pattern = dir + L"\\*";
-    WIN32_FIND_DATAW fd{};
-    HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) return false;
-    do {
-        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
-        std::wstring path = dir + L"\\" + fd.cFileName;
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            if (!CountDiskFiles(path, count, depth + 1)) { FindClose(h); return false; }
-        } else ++count;
-    } while (FindNextFileW(h, &fd));
-    FindClose(h);
+    if (root.empty() || path.size() < root.size() ||
+        CompareStringOrdinal(root.data(), static_cast<int>(root.size()),
+                             path.data(), static_cast<int>(root.size()), TRUE) != CSTR_EQUAL)
+        return false;
+    if (path.size() == root.size()) return true;
+    if (path[root.size()] != L'\\') return false;
+
+    std::wstring current = root;
+    size_t pos = root.size() + 1;
+    while (pos < path.size()) {
+        const size_t next = path.find(L'\\', pos);
+        const size_t end = next == std::wstring::npos ? path.size() : next;
+        if (end == pos) return false;
+        current += L'\\';
+        current.append(path, pos, end - pos);
+        if (!CreateDirectoryW(current.c_str(), nullptr)) {
+            const DWORD error = GetLastError();
+            if (error != ERROR_ALREADY_EXISTS) return false;
+            const DWORD attributes = GetFileAttributesW(current.c_str());
+            if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY) ||
+                (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) return false;
+        }
+        if (next == std::wstring::npos) break;
+        pos = next + 1;
+    }
+    return true;
+}
+
+bool WriteExtractedFile(const std::wstring& path, const std::vector<std::uint8_t>& data)
+{
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    size_t offset = 0;
+    bool ok = true;
+    while (offset < data.size()) {
+        const DWORD chunk = static_cast<DWORD>((std::min)(data.size() - offset,
+                                                           static_cast<size_t>(1u << 20)));
+        DWORD written = 0;
+        if (!WriteFile(file, data.data() + offset, chunk, &written, nullptr) || written != chunk) {
+            ok = false;
+            break;
+        }
+        offset += written;
+    }
+    if (!CloseHandle(file)) ok = false;
+    if (!ok) DeleteFileW(path.c_str());
+    return ok;
+}
+
+bool InflateZipEntry(const std::uint8_t* compressed, std::uint32_t compressedSize,
+                     std::uint32_t uncompressedSize, std::uint16_t method,
+                     std::vector<std::uint8_t>& output)
+{
+    output.clear();
+    if (uncompressedSize > 512u * 1024u * 1024u) return false;
+    output.resize(uncompressedSize);
+
+    if (method == 0) {
+        if (compressedSize != uncompressedSize) return false;
+        if (uncompressedSize) memcpy(output.data(), compressed, uncompressedSize);
+        return true;
+    }
+    if (method != 8) return false;
+
+    z_stream stream{};
+    stream.next_in = const_cast<Bytef*>(reinterpret_cast<const Bytef*>(compressed));
+    stream.avail_in = static_cast<uInt>(compressedSize);
+    // zlib requires a non-null output pointer even for a valid empty stream.
+    std::uint8_t emptyOutput = 0;
+    stream.next_out = output.empty() ? &emptyOutput :
+        reinterpret_cast<Bytef*>(output.data());
+    stream.avail_out = output.empty() ? 1u : static_cast<uInt>(output.size());
+
+    if (inflateInit2(&stream, -MAX_WBITS) != Z_OK) return false;
+    const int status = inflate(&stream, Z_FINISH);
+    const bool ok = status == Z_STREAM_END &&
+        stream.total_in == compressedSize && stream.total_out == uncompressedSize;
+    inflateEnd(&stream);
+    return ok;
+}
+
+bool ExtractZipPackage(const std::wstring& zipPath, std::wstring& extracted,
+                       std::wstring& content, std::wstring& error)
+{
+    std::vector<std::uint8_t> archive;
+    if (!ReadWholeFile(zipPath, archive, 256ull * 1024 * 1024) || archive.size() < 22) {
+        error = L"Unable to read the DOCX ZIP package or the file exceeds the 256 MiB limit.";
+        return false;
+    }
+
+    // Locate the classic ZIP end-of-central-directory record. ZIP64 is
+    // intentionally rejected: ordinary DOCX packages do not need it.
+    const size_t tailStart = archive.size() > 22u + 65535u ? archive.size() - (22u + 65535u) : 0;
+    size_t eocd = std::string::npos;
+    for (size_t i = archive.size() - 22 + 1; i-- > tailStart;) {
+        if (ReadLe32(archive.data() + i) == 0x06054b50u) {
+            const std::uint16_t commentLength = ReadLe16(archive.data() + i + 20);
+            if (i + 22u + commentLength == archive.size()) { eocd = i; break; }
+        }
+    }
+    if (eocd == std::string::npos) {
+        error = L"The DOCX ZIP end-of-directory record is missing or malformed.";
+        return false;
+    }
+
+    const std::uint8_t* end = archive.data() + eocd;
+    const std::uint16_t diskNumber = ReadLe16(end + 4);
+    const std::uint16_t centralDisk = ReadLe16(end + 6);
+    const std::uint16_t diskEntries = ReadLe16(end + 8);
+    const std::uint16_t entryCount = ReadLe16(end + 10);
+    const std::uint32_t centralSize = ReadLe32(end + 12);
+    const std::uint32_t centralOffset = ReadLe32(end + 16);
+    if (diskNumber || centralDisk || diskEntries != entryCount || !entryCount ||
+        entryCount == 0xffffu || centralSize == 0xffffffffu || centralOffset == 0xffffffffu ||
+        static_cast<std::uint64_t>(centralOffset) + centralSize > eocd) {
+        error = L"The DOCX package uses a multi-disk, ZIP64 or otherwise unsupported ZIP layout.";
+        return false;
+    }
+
+    wchar_t temp[MAX_PATH]{};
+    if (!GetTempPathW(MAX_PATH, temp)) {
+        error = L"Unable to locate the temporary directory.";
+        return false;
+    }
+    wchar_t unique[MAX_PATH]{};
+    if (!GetTempFileNameW(temp, L"wpx", 0, unique)) {
+        error = L"Unable to create a temporary extraction path.";
+        return false;
+    }
+    DeleteFileW(unique);
+    if (!CreateDirectoryW(unique, nullptr)) {
+        error = L"Unable to create a temporary extraction directory.";
+        return false;
+    }
+    extracted = unique;
+    struct ScopedExtractionCleanup {
+        const std::wstring& path;
+        bool keep;
+        explicit ScopedExtractionCleanup(const std::wstring& value) : path(value), keep(false) {}
+        ~ScopedExtractionCleanup() { if (!keep && !path.empty()) RemoveTree(path); }
+    } cleanup(extracted);
+
+    content = extracted + L"\\content";
+    if (!CreateDirectoryW(content.c_str(), nullptr)) {
+        error = L"Unable to create the DOCX content directory.";
+        return false;
+    }
+
+    std::set<std::wstring> seenNames;
+    std::uint64_t totalExpanded = 0;
+    size_t cursor = centralOffset;
+    const size_t centralEnd = static_cast<size_t>(centralOffset) + centralSize;
+    for (std::uint32_t index = 0; index < entryCount; ++index) {
+        if (cursor > centralEnd || centralEnd - cursor < 46 ||
+            ReadLe32(archive.data() + cursor) != 0x02014b50u) {
+            error = L"The DOCX ZIP central directory is corrupt.";
+            return false;
+        }
+        const std::uint8_t* header = archive.data() + cursor;
+        const std::uint16_t flags = ReadLe16(header + 8);
+        const std::uint16_t method = ReadLe16(header + 10);
+        const std::uint32_t expectedCrc = ReadLe32(header + 16);
+        const std::uint32_t compressedSize = ReadLe32(header + 20);
+        const std::uint32_t uncompressedSize = ReadLe32(header + 24);
+        const std::uint16_t nameLength = ReadLe16(header + 28);
+        const std::uint16_t extraLength = ReadLe16(header + 30);
+        const std::uint16_t commentLength = ReadLe16(header + 32);
+        const std::uint16_t startDisk = ReadLe16(header + 34);
+        const std::uint32_t externalAttributes = ReadLe32(header + 38);
+        const std::uint32_t localOffset = ReadLe32(header + 42);
+        const std::uint64_t recordLength = 46ull + nameLength + extraLength + commentLength;
+        if (!nameLength || nameLength > 4096 || recordLength > centralEnd - cursor ||
+            startDisk != 0 || (flags & (1u | 0x40u | 0x2000u)) || (method != 0 && method != 8) ||
+            compressedSize == 0xffffffffu || uncompressedSize == 0xffffffffu ||
+            localOffset == 0xffffffffu || uncompressedSize > 512u * 1024u * 1024u) {
+            error = L"The DOCX package contains an encrypted, ZIP64 or unsupported ZIP entry.";
+            return false;
+        }
+
+        const std::string rawName(reinterpret_cast<const char*>(header + 46), nameLength);
+        std::wstring relativePath;
+        if (!DecodeZipName(rawName, (flags & (1u << 11)) != 0, relativePath)) {
+            error = L"The DOCX package contains an invalid entry name.";
+            return false;
+        }
+        bool isDirectory = false;
+        if (!NormalizeZipPath(relativePath, isDirectory)) {
+            error = L"The DOCX package contains an unsafe entry path.";
+            return false;
+        }
+        std::wstring folded = relativePath;
+        std::transform(folded.begin(), folded.end(), folded.begin(),
+                       [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+        if (!seenNames.insert(folded).second) {
+            error = L"The DOCX package contains duplicate entry paths.";
+            return false;
+        }
+
+        const std::uint32_t unixMode = externalAttributes >> 16;
+        if ((unixMode & 0170000u) == 0120000u ||
+            (externalAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+            error = L"The DOCX package contains a symbolic link or reparse point.";
+            return false;
+        }
+        if ((externalAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+            (unixMode & 0170000u) == 0040000u)
+            isDirectory = true;
+        if (isDirectory && (compressedSize != 0 || uncompressedSize != 0)) {
+            error = L"A DOCX ZIP directory entry unexpectedly contains file data.";
+            return false;
+        }
+
+        if (!isDirectory) {
+            totalExpanded += uncompressedSize;
+            if (totalExpanded > 512ull * 1024 * 1024) {
+                error = L"The expanded DOCX package exceeds the 512 MiB limit.";
+                return false;
+            }
+        }
+
+        // Validate the corresponding local file header and derive the exact
+        // compressed-data range from its lengths (central directory sizes are
+        // authoritative, including when a data descriptor follows the data).
+        if (localOffset >= centralOffset || localOffset > archive.size() ||
+            archive.size() - localOffset < 30 ||
+            ReadLe32(archive.data() + localOffset) != 0x04034b50u) {
+            error = L"A DOCX ZIP local file header is invalid.";
+            return false;
+        }
+        const std::uint8_t* local = archive.data() + localOffset;
+        const std::uint16_t localFlags = ReadLe16(local + 6);
+        const std::uint16_t localMethod = ReadLe16(local + 8);
+        const std::uint16_t localNameLength = ReadLe16(local + 26);
+        const std::uint16_t localExtraLength = ReadLe16(local + 28);
+        const std::uint64_t dataOffset = static_cast<std::uint64_t>(localOffset) + 30u +
+                                         localNameLength + localExtraLength;
+        if (localFlags != flags || localMethod != method || localNameLength != nameLength ||
+            dataOffset > centralOffset || compressedSize > centralOffset - dataOffset ||
+            memcmp(local + 30, rawName.data(), nameLength) != 0) {
+            error = L"A DOCX ZIP entry has inconsistent local and central headers.";
+            return false;
+        }
+
+        const std::wstring outputPath = content + L"\\" + relativePath;
+        if (outputPath.size() >= MAX_PATH - 1) {
+            error = L"A DOCX package path is too long for this Windows build.";
+            return false;
+        }
+        if (isDirectory) {
+            if (!EnsureDirectory(content, outputPath)) {
+                error = L"Unable to create a DOCX package directory.";
+                return false;
+            }
+        } else {
+            const size_t slash = outputPath.find_last_of(L'\\');
+            if (slash == std::wstring::npos || !EnsureDirectory(content, outputPath.substr(0, slash))) {
+                error = L"Unable to create a DOCX package directory.";
+                return false;
+            }
+            std::vector<std::uint8_t> expanded;
+            if (!InflateZipEntry(archive.data() + static_cast<size_t>(dataOffset),
+                                 compressedSize, uncompressedSize, method, expanded)) {
+                error = L"Unable to decompress a DOCX ZIP entry.";
+                return false;
+            }
+            const uLong actualCrc = crc32(0L,
+                expanded.empty() ? Z_NULL : reinterpret_cast<const Bytef*>(expanded.data()),
+                static_cast<uInt>(expanded.size()));
+            if (static_cast<std::uint32_t>(actualCrc) != expectedCrc ||
+                !WriteExtractedFile(outputPath, expanded)) {
+                error = L"A DOCX ZIP entry failed its CRC check or could not be written.";
+                return false;
+            }
+        }
+        cursor += static_cast<size_t>(recordLength);
+    }
+    if (cursor != centralEnd) {
+        error = L"The DOCX ZIP central directory has unexpected trailing data.";
+        return false;
+    }
+    cleanup.keep = true;
     return true;
 }
 
@@ -171,91 +430,6 @@ void RemoveTree(const std::wstring& dir)
         FindClose(h);
     }
     RemoveDirectoryW(dir.c_str());
-}
-
-bool ExtractZipWithShell(const std::wstring& zipPath, std::wstring& extracted,
-                         std::wstring& content, std::wstring& error)
-{
-    wchar_t temp[MAX_PATH]{};
-    if (!GetTempPathW(MAX_PATH, temp)) { error = L"Unable to locate the temporary directory."; return false; }
-    wchar_t unique[MAX_PATH]{};
-    if (!GetTempFileNameW(temp, L"wpx", 0, unique)) { error = L"Unable to create a temporary path."; return false; }
-    DeleteFileW(unique);
-    if (!CreateDirectoryW(unique, nullptr)) { error = L"Unable to create a temporary extraction directory."; return false; }
-    extracted = unique;
-    WIN32_FILE_ATTRIBUTE_DATA zipInfo{};
-    if (!GetFileAttributesExW(zipPath.c_str(), GetFileExInfoStandard, &zipInfo)) {
-        error = L"Unable to inspect the DOCX file."; RemoveTree(extracted); return false;
-    }
-    const unsigned long long archiveBytes =
-        (static_cast<unsigned long long>(zipInfo.nFileSizeHigh) << 32) | zipInfo.nFileSizeLow;
-    if (archiveBytes == 0 || archiveBytes > 256ull * 1024 * 1024) {
-        error = L"The DOCX package is empty or exceeds the 256 MiB import limit.";
-        RemoveTree(extracted); return false;
-    }
-    const std::wstring zipCopy = extracted + L"\\package.zip";
-    content = extracted + L"\\content";
-    if (!CopyFileW(zipPath.c_str(), zipCopy.c_str(), FALSE) ||
-        !CreateDirectoryW(content.c_str(), nullptr)) {
-        error = L"Unable to prepare the DOCX extraction workspace.";
-        RemoveTree(extracted); return false;
-    }
-
-    // Shell.Application exposes Windows' built-in ZIP-folder handler.
-    const CLSID clsidShell = {0x13709620, 0xC279, 0x11CE, {0xA4,0x9E,0x44,0x45,0x53,0x54,0x00,0x00}};
-    DispatchPtr shell;
-    HRESULT hr = CoCreateInstance(clsidShell, nullptr, CLSCTX_INPROC_SERVER,
-                                  IID_IDispatch, reinterpret_cast<void**>(shell.put()));
-    if (FAILED(hr)) { error = L"Windows ZIP-folder support is unavailable."; RemoveTree(extracted); return false; }
-
-    VARIANT path; VariantInit(&path); path.vt = VT_BSTR; path.bstrVal = SysAllocString(zipCopy.c_str());
-    VARIANT zipFolderVar; VariantInit(&zipFolderVar);
-    hr = Invoke(shell.p, L"NameSpace", DISPATCH_METHOD, &path, 1, &zipFolderVar);
-    VariantClear(&path);
-    if (FAILED(hr) || zipFolderVar.vt != VT_DISPATCH || !zipFolderVar.pdispVal) {
-        VariantClear(&zipFolderVar); error = L"The DOCX file is not a readable ZIP package."; RemoveTree(extracted); return false;
-    }
-    DispatchPtr zipFolder; zipFolder.p = zipFolderVar.pdispVal; zipFolderVar.pdispVal = nullptr; VariantClear(&zipFolderVar);
-
-    VARIANT destPath; VariantInit(&destPath); destPath.vt = VT_BSTR; destPath.bstrVal = SysAllocString(content.c_str());
-    VARIANT destVar; VariantInit(&destVar);
-    hr = Invoke(shell.p, L"NameSpace", DISPATCH_METHOD, &destPath, 1, &destVar);
-    VariantClear(&destPath);
-    if (FAILED(hr) || destVar.vt != VT_DISPATCH || !destVar.pdispVal) {
-        VariantClear(&destVar); error = L"Unable to open the temporary extraction directory."; RemoveTree(extracted); return false;
-    }
-    DispatchPtr dest; dest.p = destVar.pdispVal; destVar.pdispVal = nullptr; VariantClear(&destVar);
-
-    DispatchPtr items;
-    if (!GetDispatch(zipFolder.p, L"Items", items.put())) {
-        error = L"Unable to enumerate the DOCX package."; RemoveTree(extracted); return false;
-    }
-    unsigned long long expected = 0;
-    if (!CountFiles(zipFolder.p, expected) || expected == 0 || expected > 100000) {
-        error = L"The DOCX package contains an invalid number of entries."; RemoveTree(extracted); return false;
-    }
-
-    VARIANT args[2]; VariantInit(&args[0]); VariantInit(&args[1]);
-    args[0].vt = VT_I4; args[0].lVal = 0x414; // silent, no-confirmation, no-error-UI
-    args[1].vt = VT_DISPATCH; args[1].pdispVal = items.p;
-    hr = Invoke(dest.p, L"CopyHere", DISPATCH_METHOD, args, 2, nullptr);
-    VariantClear(&args[0]); // args[1] is borrowed
-    if (FAILED(hr)) { error = L"Windows could not extract the DOCX package."; RemoveTree(extracted); return false; }
-
-    bool complete = false;
-    for (int attempt = 0; attempt < 300; ++attempt) {
-        unsigned long long actual = 0, extractedBytes = 0;
-        if (!GetDiskTreeSize(content, extractedBytes)) {
-            error = L"The expanded DOCX package exceeds the 512 MiB extraction limit.";
-            RemoveTree(extracted); return false;
-        }
-        if (CountDiskFiles(content, actual) && actual >= expected) { complete = true; break; }
-        Sleep(100);
-    }
-    if (!complete) {
-        error = L"Timed out while extracting the DOCX package."; RemoveTree(extracted); return false;
-    }
-    return true;
 }
 
 std::wstring ReadTextFile(const std::wstring& path)
@@ -292,73 +466,83 @@ std::wstring ReadTextFile(const std::wstring& path)
     return result;
 }
 
-bool LoadXml(const std::wstring& path, XmlDoc& doc)
+bool LoadXml(const std::wstring& path, CComPtr<IXMLDOMDocument2>& doc)
 {
+    doc.Release();
     HRESULT hr = CoCreateInstance(CLSID_DOMDocument60, nullptr, CLSCTX_INPROC_SERVER,
-                                  IID_IXMLDOMDocument2, reinterpret_cast<void**>(doc.put()));
-    if (FAILED(hr) || !doc.p) return false;
-    doc.p->put_async(VARIANT_FALSE);
-    doc.p->put_validateOnParse(VARIANT_FALSE);
-    doc.p->put_resolveExternals(VARIANT_FALSE);
-    doc.p->put_preserveWhiteSpace(VARIANT_TRUE);
-    BSTR propertyName = SysAllocString(L"ProhibitDTD");
-    VARIANT propertyValue; VariantInit(&propertyValue);
-    propertyValue.vt = VT_BOOL; propertyValue.boolVal = VARIANT_TRUE;
-    if (propertyName) doc.p->setProperty(propertyName, propertyValue);
-    SysFreeString(propertyName);
-    VariantClear(&propertyValue);
+                                  IID_IXMLDOMDocument2, reinterpret_cast<void**>(&doc));
+    if (FAILED(hr) || !doc) return false;
+    doc->put_async(VARIANT_FALSE);
+    doc->put_validateOnParse(VARIANT_FALSE);
+    doc->put_resolveExternals(VARIANT_FALSE);
+    doc->put_preserveWhiteSpace(VARIANT_TRUE);
+
+    CComBSTR propertyName(L"ProhibitDTD");
+    CComVariant propertyValue;
+    propertyValue.vt = VT_BOOL;
+    propertyValue.boolVal = VARIANT_TRUE;
+    if (propertyName.m_str)
+        doc->setProperty(propertyName, propertyValue);
+
     std::wstring xml = ReadTextFile(path);
-    if (xml.empty()) return false;
-    BSTR xmlText = SysAllocStringLen(xml.data(), static_cast<UINT>(xml.size()));
-    if (!xmlText) return false;
+    if (xml.empty() || xml.size() > static_cast<size_t>((std::numeric_limits<int>::max)()))
+        return false;
+    CComBSTR xmlText(static_cast<int>(xml.size()), xml.data());
+    if (!xmlText.m_str) return false;
     VARIANT_BOOL loaded = VARIANT_FALSE;
-    HRESULT loadResult = doc.p->loadXML(xmlText, &loaded);
-    SysFreeString(xmlText);
+    const HRESULT loadResult = doc->loadXML(xmlText, &loaded);
     return SUCCEEDED(loadResult) && loaded == VARIANT_TRUE;
 }
 
 std::wstring NodeName(IXMLDOMNode* node)
 {
-    BSTR s = nullptr;
-    if (FAILED(node->get_nodeName(&s)) || !s) return {};
-    std::wstring result(s, SysStringLen(s)); SysFreeString(s);
+    if (!node) return {};
+    CComBSTR name;
+    if (FAILED(node->get_nodeName(&name)) || !name.m_str) return {};
+    std::wstring result(name.m_str, name.Length());
     const auto colon = result.find_last_of(L':');
     if (colon != std::wstring::npos) result.erase(0, colon + 1);
     return result;
 }
+
 std::wstring NodeText(IXMLDOMNode* node)
 {
-    BSTR s = nullptr;
-    if (FAILED(node->get_text(&s)) || !s) return {};
-    std::wstring result(s, SysStringLen(s)); SysFreeString(s); return result;
+    if (!node) return {};
+    CComBSTR text;
+    if (FAILED(node->get_text(&text)) || !text.m_str) return {};
+    return std::wstring(text.m_str, text.Length());
 }
+
 std::wstring Attr(IXMLDOMNode* node, const wchar_t* name)
 {
-    IXMLDOMNamedNodeMap* attrs = nullptr;
+    if (!node) return {};
+    CComPtr<IXMLDOMNamedNodeMap> attrs;
     if (FAILED(node->get_attributes(&attrs)) || !attrs) return {};
-    long count = 0; attrs->get_length(&count);
-    std::wstring value;
+    long count = 0;
+    if (FAILED(attrs->get_length(&count))) return {};
     for (long i = 0; i < count; ++i) {
-        IXMLDOMNode* attr = nullptr;
-        if (SUCCEEDED(attrs->get_item(i, &attr)) && attr) {
-            if (NodeName(attr) == name) value = NodeText(attr);
-            attr->Release();
-            if (!value.empty()) break;
-        }
+        CComPtr<IXMLDOMNode> attr;
+        if (SUCCEEDED(attrs->get_item(i, &attr)) && attr && NodeName(attr.p) == name)
+            return NodeText(attr.p);
     }
-    attrs->Release(); return value;
+    return {};
 }
-std::vector<IXMLDOMNode*> Children(IXMLDOMNode* node)
+
+std::vector<CComPtr<IXMLDOMNode>> Children(IXMLDOMNode* node)
 {
-    std::vector<IXMLDOMNode*> out;
-    IXMLDOMNodeList* list = nullptr;
+    std::vector<CComPtr<IXMLDOMNode>> out;
+    if (!node) return out;
+    CComPtr<IXMLDOMNodeList> list;
     if (FAILED(node->get_childNodes(&list)) || !list) return out;
-    long count = 0; list->get_length(&count);
+    long count = 0;
+    if (FAILED(list->get_length(&count))) return out;
+    out.reserve(static_cast<size_t>((std::max)(0L, count)));
     for (long i = 0; i < count; ++i) {
-        IXMLDOMNode* child = nullptr;
-        if (SUCCEEDED(list->get_item(i, &child)) && child) out.push_back(child);
+        CComPtr<IXMLDOMNode> child;
+        if (SUCCEEDED(list->get_item(i, &child)) && child)
+            out.push_back(child);
     }
-    list->Release(); return out;
+    return out;
 }
 std::wstring NormalizeTarget(const std::wstring& target)
 {
@@ -434,20 +618,19 @@ struct ImportContext {
         if (!options.importImages) return false;
         std::wstring rid, ext;
         long widthTwips = 3000, heightTwips = 2000;
-        std::vector<IXMLDOMNode*> stack = Children(drawing);
+        auto stack = Children(drawing);
         while (!stack.empty()) {
-            IXMLDOMNode* n = stack.back(); stack.pop_back();
-            const auto nodeName = NodeName(n);
-            if (nodeName == L"blip") rid = Attr(n, L"embed");
+            CComPtr<IXMLDOMNode> node = stack.back();
+            stack.pop_back();
+            const auto nodeName = NodeName(node.p);
+            if (nodeName == L"blip") rid = Attr(node.p, L"embed");
             else if (nodeName == L"extent") {
-                const auto cx = Attr(n, L"cx"), cy = Attr(n, L"cy");
+                const auto cx = Attr(node.p, L"cx"), cy = Attr(node.p, L"cy");
                 if (!cx.empty()) widthTwips = std::max(1L, std::min(20000L, _wtol(cx.c_str()) / 635));
                 if (!cy.empty()) heightTwips = std::max(1L, std::min(20000L, _wtol(cy.c_str()) / 635));
             }
-            auto children = Children(n);
-            for (auto* c : children) stack.push_back(c);
-            // Nodes remain owned by stack until processed; release after visiting.
-            n->Release();
+            auto children = Children(node.p);
+            for (const auto& child : children) stack.push_back(child);
         }
         if (rid.empty()) return false;
         auto it = rels.find(rid);
@@ -465,39 +648,41 @@ struct ImportContext {
                L"\\pich" + std::to_wstring(std::max(1L, heightTwips / 15)) +
                L"\\picwgoal" + std::to_wstring(widthTwips) +
                L"\\pichgoal" + std::to_wstring(heightTwips) + L"\n" + Hex(bytes) + L"}";
-        ++result.imagesRead; return true;
+        ++result.imagesRead;
+        return true;
     }
 
     void Run(IXMLDOMNode* run)
     {
         rtf += L"{";
-        IXMLDOMNode* props = nullptr;
+        CComPtr<IXMLDOMNode> properties;
         auto children = Children(run);
-        for (auto* child : children) {
-            const auto name = NodeName(child);
-            if (name == L"rPr") props = child;
-        }
-        if (props) {
-            auto p = Children(props);
-            for (auto* x : p) {
-                auto n = NodeName(x);
-                if (n == L"b" && Attr(x, L"val") != L"0" && Attr(x, L"val") != L"false") rtf += L"\\b";
-                else if (n == L"i" && Attr(x, L"val") != L"0" && Attr(x, L"val") != L"false") rtf += L"\\i";
-                else if ((n == L"strike" || n == L"dstrike") && Attr(x, L"val") != L"0") rtf += L"\\strike";
-                else if (n == L"u" && Attr(x, L"val") != L"none" && Attr(x, L"val") != L"0") rtf += L"\\ul";
-                else if (n == L"sz") {
-                    auto v = Attr(x, L"val"); if (!v.empty()) rtf += L"\\fs" + v;
-                }
-                x->Release();
+        for (const auto& child : children) {
+            if (NodeName(child.p) == L"rPr") {
+                properties = child.p;
+                break;
             }
         }
-        for (auto* child : children) {
-            auto name = NodeName(child);
-            if (name == L"t") rtf += RtfText(NodeText(child));
+        if (properties) {
+            auto propertyNodes = Children(properties.p);
+            for (const auto& property : propertyNodes) {
+                const auto name = NodeName(property.p);
+                if (name == L"b" && Attr(property.p, L"val") != L"0" && Attr(property.p, L"val") != L"false") rtf += L"\\b";
+                else if (name == L"i" && Attr(property.p, L"val") != L"0" && Attr(property.p, L"val") != L"false") rtf += L"\\i";
+                else if ((name == L"strike" || name == L"dstrike") && Attr(property.p, L"val") != L"0") rtf += L"\\strike";
+                else if (name == L"u" && Attr(property.p, L"val") != L"none" && Attr(property.p, L"val") != L"0") rtf += L"\\ul";
+                else if (name == L"sz") {
+                    auto value = Attr(property.p, L"val");
+                    if (!value.empty()) rtf += L"\\fs" + value;
+                }
+            }
+        }
+        for (const auto& child : children) {
+            const auto name = NodeName(child.p);
+            if (name == L"t") rtf += RtfText(NodeText(child.p));
             else if (name == L"tab") rtf += L"\\tab ";
-            else if (name == L"br") rtf += (Attr(child, L"type") == L"page" ? L"\\page " : L"\\line ");
-            else if (name == L"drawing" || name == L"pict") Image(child);
-            child->Release();
+            else if (name == L"br") rtf += (Attr(child.p, L"type") == L"page" ? L"\\page " : L"\\line ");
+            else if (name == L"drawing" || name == L"pict") Image(child.p);
         }
         rtf += L"\\plain}";
     }
@@ -506,107 +691,125 @@ struct ImportContext {
     {
         rtf += inTable ? L"\\pard\\intbl" : L"\\pard";
         auto children = Children(paragraph);
-        IXMLDOMNode* pPr = nullptr;
-        for (auto* c : children) if (NodeName(c) == L"pPr") pPr = c;
-        if (pPr) {
-            auto props = Children(pPr);
-            for (auto* p : props) {
-                auto n = NodeName(p);
-                if (n == L"jc") {
-                    auto v = Attr(p, L"val");
-                    if (v == L"center") rtf += L"\\qc";
-                    else if (v == L"right" || v == L"end") rtf += L"\\qr";
-                    else if (v == L"both" || v == L"distribute") rtf += L"\\qj";
-                    else rtf += L"\\ql";
-                }
-                p->Release();
+        CComPtr<IXMLDOMNode> paragraphProperties;
+        for (const auto& child : children) {
+            if (NodeName(child.p) == L"pPr") {
+                paragraphProperties = child.p;
+                break;
             }
         }
-        for (auto* c : children) {
-            auto n = NodeName(c);
-            if (n == L"r") Run(c);
-            else if (n == L"hyperlink") Hyperlink(c);
-            else if (n == L"bookmarkStart" || n == L"bookmarkEnd" || n == L"pPr") {}
-            c->Release();
+        if (paragraphProperties) {
+            auto properties = Children(paragraphProperties.p);
+            for (const auto& property : properties) {
+                if (NodeName(property.p) == L"jc") {
+                    const auto value = Attr(property.p, L"val");
+                    if (value == L"center") rtf += L"\\qc";
+                    else if (value == L"right" || value == L"end") rtf += L"\\qr";
+                    else if (value == L"both" || value == L"distribute") rtf += L"\\qj";
+                    else rtf += L"\\ql";
+                }
+            }
+        }
+        for (const auto& child : children) {
+            const auto name = NodeName(child.p);
+            if (name == L"r") Run(child.p);
+            else if (name == L"hyperlink") Hyperlink(child.p);
         }
         rtf += L"\\par\n";
     }
 
     void Hyperlink(IXMLDOMNode* link)
     {
+        auto appendRuns = [&]() {
+            auto children = Children(link);
+            for (const auto& child : children)
+                if (NodeName(child.p) == L"r") Run(child.p);
+        };
         if (!options.importHyperlinks) {
-            auto ch = Children(link); for (auto* c : ch) { if (NodeName(c) == L"r") Run(c); c->Release(); }
+            appendRuns();
             return;
         }
         std::wstring rid = Attr(link, L"id"), target;
-        auto it = rels.find(rid); if (it != rels.end()) target = it->second;
+        auto it = rels.find(rid);
+        if (it != rels.end()) target = it->second;
         if (target.empty() || target.find(L":") == std::wstring::npos) {
-            auto ch = Children(link); for (auto* c : ch) { if (NodeName(c) == L"r") Run(c); c->Release(); }
+            appendRuns();
             return;
         }
         std::wstring fieldTarget = RtfText(target);
         size_t quote = 0;
         while ((quote = fieldTarget.find(L'"', quote)) != std::wstring::npos) {
-            fieldTarget.replace(quote, 1, L"\\'22"); quote += 4;
+            fieldTarget.replace(quote, 1, L"\\'22");
+            quote += 4;
         }
         rtf += L"{\\field{\\*\\fldinst HYPERLINK \"" + fieldTarget + L"\"}{\\fldrslt ";
-        auto ch = Children(link); for (auto* c : ch) { if (NodeName(c) == L"r") Run(c); c->Release(); }
-        rtf += L"}}"; ++result.hyperlinksRead;
+        appendRuns();
+        rtf += L"}}";
+        ++result.hyperlinksRead;
     }
 
     void Table(IXMLDOMNode* table)
     {
         auto rows = Children(table);
-        for (auto* row : rows) {
-            if (NodeName(row) != L"tr") { row->Release(); continue; }
+        for (const auto& row : rows) {
+            if (NodeName(row.p) != L"tr") continue;
             rtf += L"\\trowd\\trgaph108\\trleft0";
-            auto cells = Children(row); int x = 1800;
-            for (auto* cell : cells) if (NodeName(cell) == L"tc") { x += 1800; rtf += L"\\cellx" + std::to_wstring(x); }
-            rtf += L"\n";
-            for (auto* cell : cells) {
-                if (NodeName(cell) == L"tc") {
-                    rtf += L"\\intbl ";
-                    auto blocks = Children(cell);
-                    for (auto* b : blocks) {
-                        if (NodeName(b) == L"p") Paragraph(b, true);
-                        else if (NodeName(b) == L"tbl") Table(b);
-                        b->Release();
-                    }
-                    rtf += L"\\cell ";
+            auto cells = Children(row.p);
+            int x = 1800;
+            for (const auto& cell : cells) {
+                if (NodeName(cell.p) == L"tc") {
+                    x += 1800;
+                    rtf += L"\\cellx" + std::to_wstring(x);
                 }
-                cell->Release();
+            }
+            rtf += L"\n";
+            for (const auto& cell : cells) {
+                if (NodeName(cell.p) != L"tc") continue;
+                rtf += L"\\intbl ";
+                auto blocks = Children(cell.p);
+                for (const auto& block : blocks) {
+                    const auto name = NodeName(block.p);
+                    if (name == L"p") Paragraph(block.p, true);
+                    else if (name == L"tbl") Table(block.p);
+                }
+                rtf += L"\\cell ";
             }
             rtf += L"\\row\n";
-            row->Release();
         }
     }
 };
 
 bool LoadRelationships(const std::wstring& path, std::map<std::wstring,std::wstring>& rels)
 {
-    XmlDoc doc; if (!LoadXml(path, doc)) return false;
-    IXMLDOMElement* root = nullptr; if (FAILED(doc.p->get_documentElement(&root)) || !root) return false;
-    auto children = Children(root); root->Release();
-    for (auto* n : children) {
-        if (NodeName(n) == L"Relationship") {
-            std::wstring id = Attr(n, L"Id"), target = Attr(n, L"Target");
-            std::wstring mode = Attr(n, L"TargetMode");
-            if (!id.empty() && !target.empty() && mode != L"External") rels[id] = NormalizeTarget(target);
-            else if (!id.empty() && !target.empty() && mode == L"External") rels[id] = target;
+    CComPtr<IXMLDOMDocument2> doc;
+    if (!LoadXml(path, doc)) return false;
+    CComPtr<IXMLDOMElement> root;
+    if (FAILED(doc->get_documentElement(&root)) || !root) return false;
+    auto children = Children(root.p);
+    for (const auto& node : children) {
+        if (NodeName(node.p) == L"Relationship") {
+            std::wstring id = Attr(node.p, L"Id");
+            std::wstring target = Attr(node.p, L"Target");
+            std::wstring mode = Attr(node.p, L"TargetMode");
+            if (!id.empty() && !target.empty() && mode != L"External")
+                rels[id] = NormalizeTarget(target);
+            else if (!id.empty() && !target.empty() && mode == L"External")
+                rels[id] = target;
         }
-        n->Release();
     }
     return true;
 }
 
 } // namespace
 
-Result ConvertToRtf(const std::wstring& fileName, std::vector<std::uint8_t>& rtf,
-                    const Options& options)
+static Result ConvertToRtfOnSta(const std::wstring& fileName,
+                                std::vector<std::uint8_t>& rtf,
+                                const Options& options)
 {
     Result result;
+
     std::wstring extracted, content;
-    if (!ExtractZipWithShell(fileName, extracted, content, result.error)) return result;
+    if (!ExtractZipPackage(fileName, extracted, content, result.error)) return result;
     struct Cleanup { std::wstring path; ~Cleanup() { if (!path.empty()) RemoveTree(path); } } cleanup{extracted};
 
     const std::wstring documentPath = content + L"\\word\\document.xml";
@@ -619,24 +822,22 @@ Result ConvertToRtf(const std::wstring& fileName, std::vector<std::uint8_t>& rtf
     if (GetFileAttributesW(relsPath.c_str()) != INVALID_FILE_ATTRIBUTES)
         LoadRelationships(relsPath, rels);
 
-    XmlDoc doc;
+    CComPtr<IXMLDOMDocument2> doc;
     if (!LoadXml(documentPath, doc)) { result.error = L"Unable to parse the DOCX document XML."; return result; }
-    IXMLDOMElement* root = nullptr;
-    if (FAILED(doc.p->get_documentElement(&root)) || !root) { result.error = L"The DOCX document XML has no root element."; return result; }
+    CComPtr<IXMLDOMElement> root;
+    if (FAILED(doc->get_documentElement(&root)) || !root) { result.error = L"The DOCX document XML has no root element."; return result; }
 
     ImportContext context{content, std::move(rels), options, result};
-    auto rootChildren = Children(root); root->Release();
-    for (auto* child : rootChildren) {
-        if (NodeName(child) == L"body") {
-            auto blocks = Children(child);
-            for (auto* block : blocks) {
-                auto name = NodeName(block);
-                if (name == L"p") context.Paragraph(block);
-                else if (name == L"tbl") context.Table(block);
-                block->Release();
+    auto rootChildren = Children(root.p);
+    for (const auto& child : rootChildren) {
+        if (NodeName(child.p) == L"body") {
+            auto blocks = Children(child.p);
+            for (const auto& block : blocks) {
+                const auto name = NodeName(block.p);
+                if (name == L"p") context.Paragraph(block.p);
+                else if (name == L"tbl") context.Table(block.p);
             }
         }
-        child->Release();
     }
     context.rtf += L"}";
     if (context.rtf.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
@@ -647,6 +848,55 @@ Result ConvertToRtf(const std::wstring& fileName, std::vector<std::uint8_t>& rtf
     rtf.resize(bytes);
     WideCharToMultiByte(CP_ACP, 0, context.rtf.data(), (int)context.rtf.size(), reinterpret_cast<char*>(rtf.data()), bytes, nullptr, nullptr);
     result.success = true;
+    return result;
+}
+
+Result ConvertToRtf(const std::wstring& fileName, std::vector<std::uint8_t>& rtf,
+                    const Options& options)
+{
+    Result result;
+    std::vector<std::uint8_t> converted;
+    std::exception_ptr workerException;
+
+    // Isolate MSXML COM work on a dedicated STA. ZIP extraction itself uses
+    // the in-process ZIP reader (zlib) and does not use Shell Automation or IDispatch.
+    std::thread worker([&]() {
+        ComApartment apartment;
+        if (!apartment.usable()) {
+            result.error = L"Unable to initialize the DOCX import STA (HRESULT " +
+                std::to_wstring(static_cast<unsigned long>(apartment.result())) + L").";
+            return;
+        }
+        try {
+            result = ConvertToRtfOnSta(fileName, converted, options);
+        }
+        catch (...) {
+            workerException = std::current_exception();
+        }
+    });
+    worker.join();
+
+    if (workerException) {
+        try { std::rethrow_exception(workerException); }
+        catch (const std::exception& e) {
+            // The importer is used from the document-open path; do not allow
+            // an exception on the worker to terminate the application.
+            int n = MultiByteToWideChar(CP_UTF8, 0, e.what(), -1, nullptr, 0);
+            if (n > 1) {
+                std::wstring message(static_cast<size_t>(n), L'\0');
+                MultiByteToWideChar(CP_UTF8, 0, e.what(), -1, &message[0], n);
+                message.pop_back(); // remove the converted terminating NUL
+                result.error = L"DOCX import failed: " + message;
+            } else result.error = L"DOCX import failed due to an unexpected exception.";
+        }
+        catch (...) {
+            result.error = L"DOCX import failed due to an unexpected exception.";
+        }
+        result.success = false;
+        return result;
+    }
+
+    if (result.success) rtf.swap(converted);
     return result;
 }
 

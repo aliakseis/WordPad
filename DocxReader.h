@@ -24,7 +24,8 @@ namespace docxreader
     };
 
     // Converts a DOCX package to RTF for loading by the Rich Edit control.
-    // Extraction uses the Windows ZIP-folder shell namespace; XML is parsed by MSXML 6.
+    // ZIP extraction is performed in-process with zlib; XML is parsed by MSXML 6.
+    // COM work is isolated on a dedicated STA worker thread.
     Result ConvertToRtf(const std::wstring& fileName,
                         std::vector<std::uint8_t>& rtf,
                         const Options& options = {});
