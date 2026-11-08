@@ -293,9 +293,9 @@ void CButtonDialog::PositionControls()
 			nButtonAdj*2;
 	}
 
-	nWidth = min(nTextIconWidth,nScreenWidth58);
-	nWidth = max(nWidth, nCaptionWidth);
-	nWidth = max(nWidth, nButtonsWidth);
+	nWidth = std::min(nTextIconWidth,nScreenWidth58);
+	nWidth = std::max(nWidth, nCaptionWidth);
+	nWidth = std::max(nWidth, nButtonsWidth);
 
 	m_staticIcon.SetWindowPos(NULL, nLeftMargin, nTopMargin, sizeIcon.cx,
 		sizeIcon.cy, SWP_NOZORDER);
@@ -314,7 +314,7 @@ void CButtonDialog::PositionControls()
 	m_staticText.SetWindowPos(NULL, nSep+sizeIcon.cx+nSep, nTopMargin,
 		sizeText.cx, sizeText.cy, SWP_NOZORDER);
 
-	sizeText.cy = max(sizeText.cy, sizeIcon.cy); // at least icon height
+	sizeText.cy = std::max(sizeText.cy, sizeIcon.cy); // at least icon height
 	nHeight = nTopMargin + sizeText.cy + nSep + nButtonHeight + nBottomMargin;
 
 	CRect rect;

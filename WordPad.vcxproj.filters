@@ -105,9 +105,6 @@
     <ClCompile Include="PasteHtmlIntoRichEdit.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="RichEditStream.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="DocReader.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -216,9 +213,6 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="DocReader.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="RichEditStream.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

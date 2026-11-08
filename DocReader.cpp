@@ -9,11 +9,13 @@
 #include <ole2.h>
 
 #include <algorithm>
+#include <cstring>
 #include <array>
 #include <fstream>
 #include <limits>
 #include <memory>
 #include <sstream>
+#include <unordered_map>
 
 namespace docreader
 {
@@ -22,6 +24,7 @@ namespace
     constexpr std::uint16_t kWordIdent = 0xA5EC;
     constexpr std::size_t kFibBaseSize = 32;
     constexpr std::size_t kFibRgFcLcbClxIndex = 33;
+    constexpr std::size_t kFibRgFcLcbBteChpxIndex = 12;
 
     struct ComPtr
     {
@@ -58,7 +61,7 @@ namespace
         {
             ULONG got = 0;
             const ULONG request = static_cast<ULONG>(
-                std::min<std::size_t>(bytes - done, (std::numeric_limits<ULONG>::max)()));
+                std::min<std::size_t>(bytes - done, std::numeric_limits<ULONG>::max()));
             if (FAILED(stream->Read(out + done, request, &got)) || got == 0)
                 return false;
             done += got;
@@ -91,7 +94,7 @@ namespace
     bool ReadVector(IStream* s, std::uint64_t off, std::uint64_t len,
                     std::uint64_t limit, std::vector<std::uint8_t>& out)
     {
-        if (len > limit || len > (std::numeric_limits<std::size_t>::max)())
+        if (len > limit || len > std::numeric_limits<std::size_t>::max())
             return false;
         out.resize(static_cast<std::size_t>(len));
         return len == 0 || ReadAt(s, off, out.data(), out.size());
@@ -105,6 +108,8 @@ namespace
         std::uint32_t fcMac = 0;
         std::uint32_t fcClx = 0;
         std::uint32_t lcbClx = 0;
+        std::uint32_t fcPlcfBteChpx = 0;
+        std::uint32_t lcbPlcfBteChpx = 0;
     };
 
     bool ParseFib(const std::vector<std::uint8_t>& word, FibInfo& fib, std::wstring& error)
@@ -172,6 +177,9 @@ namespace
         const std::size_t clxEntry = pos + kFibRgFcLcbClxIndex * 8;
         fib.fcClx = U32(word, clxEntry);
         fib.lcbClx = U32(word, clxEntry + 4);
+        const std::size_t chpxEntry = pos + kFibRgFcLcbBteChpxIndex * 8;
+        fib.fcPlcfBteChpx = U32(word, chpxEntry);
+        fib.lcbPlcfBteChpx = U32(word, chpxEntry + 4);
 
         if (fib.encrypted)
         {
@@ -191,7 +199,7 @@ namespace
     {
         if (count == 0)
             return true;
-        if (count > static_cast<std::size_t>((std::numeric_limits<int>::max)()))
+        if (count > static_cast<std::size_t>(std::numeric_limits<int>::max()))
             return false;
 
         const int needed = MultiByteToWideChar(codePage, 0,
@@ -326,6 +334,209 @@ namespace
         return true;
     }
 
+    struct ChpxRun
+    {
+        std::uint32_t fcFirst = 0;
+        std::uint32_t fcLim = 0;
+        std::uint32_t picLocation = 0;
+        bool hasPicture = false;
+    };
+
+    std::size_t SprmOperandLength(std::uint16_t sprm, const std::uint8_t* p,
+                                  std::size_t remaining)
+    {
+        const unsigned spra = (sprm >> 13) & 7;
+        switch (spra)
+        {
+        case 0: case 1: return 1;
+        case 2: return 2;
+        case 3: return 4;
+        case 4: return 2;
+        case 5: return 2;
+        case 6:
+            if (remaining < 1) return remaining + 1;
+            if (p[0] != 0xFF) return std::size_t(p[0]) + 1;
+            if (remaining < 3) return remaining + 1;
+            return std::size_t(p[1] | (std::uint16_t(p[2]) << 8)) + 3;
+        case 7: return 3;
+        }
+        return remaining + 1;
+    }
+
+    bool ParseChpxRuns(const std::vector<std::uint8_t>& word,
+                       const std::vector<std::uint8_t>& table,
+                       const FibInfo& fib, std::vector<ChpxRun>& runs)
+    {
+        const std::uint64_t off = fib.fcPlcfBteChpx;
+        const std::uint64_t len = fib.lcbPlcfBteChpx;
+        if (!len || len < 12 || off + len > table.size() || (len - 4) % 8 != 0)
+            return false;
+
+        const std::uint32_t count = static_cast<std::uint32_t>((len - 4) / 8);
+        if (!count || count > 100000)
+            return false;
+        const std::size_t fcBase = static_cast<std::size_t>(off);
+        const std::size_t pnBase = fcBase + std::size_t(count + 1) * 4;
+        for (std::uint32_t i = 0; i < count; ++i)
+        {
+            const std::uint32_t pn = U32(table, pnBase + std::size_t(i) * 4);
+            const std::uint64_t pageOff64 = std::uint64_t(pn) * 512;
+            if (pageOff64 + 512 > word.size())
+                continue;
+            const std::size_t page = static_cast<std::size_t>(pageOff64);
+            const std::uint8_t crun = word[page + 511];
+            if (!crun || std::size_t(crun + 1) * 4 + crun > 511)
+                continue;
+            const std::size_t bxBase = page + std::size_t(crun + 1) * 4;
+            for (unsigned j = 0; j < crun; ++j)
+            {
+                ChpxRun run;
+                run.fcFirst = U32(word, page + std::size_t(j) * 4);
+                run.fcLim = U32(word, page + std::size_t(j + 1) * 4);
+                if (run.fcLim <= run.fcFirst)
+                    continue;
+                const std::uint8_t chpxOffset = word[bxBase + j];
+                if (!chpxOffset)
+                    continue;
+                const std::size_t chpx = page + std::size_t(chpxOffset) * 2;
+                if (chpx >= page + 511)
+                    continue;
+                const std::uint8_t cb = word[chpx];
+                if (std::size_t(chpx) + 1 + cb > page + 511)
+                    continue;
+                std::size_t pos = chpx + 1;
+                const std::size_t end = pos + cb;
+                while (pos + 2 <= end)
+                {
+                    const std::uint16_t sprm = std::uint16_t(word[pos]) |
+                        (std::uint16_t(word[pos + 1]) << 8);
+                    pos += 2;
+                    const std::size_t operand = SprmOperandLength(sprm,
+                        word.data() + pos, end - pos);
+                    if (operand > end - pos)
+                        break;
+                    if (sprm == 0x6A03 && operand == 4)
+                    {
+                        run.picLocation = U32(word, pos);
+                        run.hasPicture = true;
+                    }
+                    pos += operand;
+                }
+                if (run.hasPicture)
+                    runs.push_back(run);
+            }
+        }
+        return !runs.empty();
+    }
+
+    struct Picture
+    {
+        std::string control;
+        std::vector<std::uint8_t> bytes;
+        unsigned width = 0;
+        unsigned height = 0;
+    };
+
+    bool FindPictureBytes(const std::vector<std::uint8_t>& data, std::uint32_t offset,
+                          std::uint64_t maxBytes, Picture& picture)
+    {
+        if (offset > data.size() || data.size() - offset < 68)
+            return false;
+        const std::uint32_t lcb = U32(data, offset);
+        if (lcb < 68 || lcb > maxBytes || std::uint64_t(offset) + lcb > data.size())
+            return false;
+        const std::size_t begin = std::size_t(offset) + 68;
+        const std::size_t end = std::size_t(offset) + lcb;
+
+        // OfficeArt blips contain their native file signature after a UID.
+        // Search only inside this PICF's declared extent and require a complete
+        // PNG/JPEG image terminator before accepting a candidate.
+        static const std::uint8_t pngSig[8] = { 137,80,78,71,13,10,26,10 };
+        for (std::size_t p = begin; p + 8 <= end; ++p)
+        {
+            if (std::memcmp(data.data() + p, pngSig, 8) == 0)
+            {
+                std::size_t q = p + 8;
+                bool foundEnd = false;
+                while (q + 12 <= end)
+                {
+                    const std::uint32_t chunk = std::uint32_t(data[q]) << 24 |
+                        std::uint32_t(data[q + 1]) << 16 |
+                        std::uint32_t(data[q + 2]) << 8 | data[q + 3];
+                    if (chunk > end - q - 12) break;
+                    const bool iend = data[q + 4] == 'I' && data[q + 5] == 'E' &&
+                        data[q + 6] == 'N' && data[q + 7] == 'D';
+                    q += std::size_t(chunk) + 12;
+                    if (iend) { foundEnd = true; break; }
+                }
+                if (foundEnd)
+                {
+                    picture.control = "pngblip";
+                    picture.bytes.assign(data.begin() + p, data.begin() + q);
+                    if (p + 24 <= end && data[p + 12] == 'I' && data[p + 13] == 'H' &&
+                        data[p + 14] == 'D' && data[p + 15] == 'R')
+                    {
+                        picture.width = (unsigned(data[p + 16]) << 24) |
+                            (unsigned(data[p + 17]) << 16) | (unsigned(data[p + 18]) << 8) | data[p + 19];
+                        picture.height = (unsigned(data[p + 20]) << 24) |
+                            (unsigned(data[p + 21]) << 16) | (unsigned(data[p + 22]) << 8) | data[p + 23];
+                    }
+                    return true;
+                }
+            }
+            if (data[p] == 0xFF && data[p + 1] == 0xD8 && data[p + 2] == 0xFF)
+            {
+                for (std::size_t q = p + 3; q + 1 < end; ++q)
+                {
+                    if (data[q] == 0xFF && data[q + 1] == 0xD9)
+                    {
+                        picture.control = "jpegblip";
+                        picture.bytes.assign(data.begin() + p, data.begin() + q + 2);
+                        // Read dimensions from a Start Of Frame marker.
+                        for (std::size_t k = p + 2; k + 8 < q; )
+                        {
+                            if (data[k] != 0xFF) { ++k; continue; }
+                            const std::uint8_t marker = data[k + 1];
+                            if (marker == 0xC0 || marker == 0xC1 || marker == 0xC2 || marker == 0xC3)
+                            {
+                                picture.height = (unsigned(data[k + 5]) << 8) | data[k + 6];
+                                picture.width = (unsigned(data[k + 7]) << 8) | data[k + 8];
+                                break;
+                            }
+                            if (k + 4 > q) break;
+                            const unsigned seg = (unsigned(data[k + 2]) << 8) | data[k + 3];
+                            if (seg < 2) break;
+                            k += 2 + seg;
+                        }
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    void AppendPictureRtf(std::wstring& rtf, const Picture& picture)
+    {
+        rtf += L"{\\pict\\";
+        for (char c : picture.control) rtf.push_back(static_cast<wchar_t>(c));
+        if (picture.width) rtf += L"\\picw" + std::to_wstring(picture.width);
+        if (picture.height) rtf += L"\\pich" + std::to_wstring(picture.height);
+        if (picture.width) rtf += L"\\picwgoal" + std::to_wstring(picture.width * 15u);
+        if (picture.height) rtf += L"\\pichgoal" + std::to_wstring(picture.height * 15u);
+        rtf += L" ";
+        static const wchar_t hex[] = L"0123456789abcdef";
+        unsigned column = 0;
+        for (std::uint8_t b : picture.bytes)
+        {
+            rtf.push_back(hex[b >> 4]);
+            rtf.push_back(hex[b & 15]);
+            column += 2;
+            if (column >= 128) { rtf += L"\n"; column = 0; }
+        }
+        rtf += L"}";
+    }
+
     void AppendRtfUnicode(std::wstring& out, wchar_t ch)
     {
         const unsigned int c = static_cast<unsigned int>(ch);
@@ -355,37 +566,38 @@ namespace
         }
     }
 
-    std::wstring MakeRtf(const std::wstring& text, bool placeholders)
+    std::wstring MakeRtf(const std::wstring& text,
+                         const std::unordered_map<std::uint32_t, Picture>& pictures,
+                         bool placeholders)
     {
         std::wstring rtf = L"{\\rtf1\\ansi\\deff0\\uc1\\viewkind4";
         rtf += L"{\\fonttbl{\\f0\\fnil Segoe UI;}}";
         rtf += L"\\f0\\fs20 ";
 
-        for (wchar_t ch : text)
+        for (std::size_t cp = 0; cp < text.size(); ++cp)
         {
+            const wchar_t ch = text[cp];
+            if (ch == 0x0001)
+            {
+                const auto it = pictures.find(static_cast<std::uint32_t>(cp));
+                if (it != pictures.end()) AppendPictureRtf(rtf, it->second);
+                else if (placeholders) rtf += L"[picture] ";
+                continue;
+            }
             switch (ch)
             {
             case L'\r': rtf += L"\\par\n"; break;
-            case L'\n': break; // Word paragraph terminators are CR (0x0D).
+            case L'\n': break;
             case 0x0007: rtf += L"\\cell "; break;
             case 0x000B: rtf += L"\\line "; break;
             case 0x000C: rtf += L"\\page "; break;
-            case 0x0001:
             case 0x0008:
-                if (placeholders)
-                    rtf += L"[object] ";
+                if (placeholders) rtf += L"[object] ";
                 break;
-            case 0x0013: // field begin
-            case 0x0014: // field separator
-            case 0x0015: // field end
-                // Field instruction text is retained as ordinary text.
-                break;
-            default:
-                AppendRtfUnicode(rtf, ch);
-                break;
+            case 0x0013: case 0x0014: case 0x0015: break;
+            default: AppendRtfUnicode(rtf, ch); break;
             }
         }
-
         rtf += L"}";
         return rtf;
     }
@@ -397,7 +609,7 @@ namespace
             bytes.clear();
             return true;
         }
-        if (text.size() > static_cast<std::size_t>((std::numeric_limits<int>::max)()))
+        if (text.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
             return false;
 
         const int needed = WideCharToMultiByte(CP_UTF8, 0, text.data(),
@@ -498,6 +710,15 @@ Result ConvertToRtf(const std::wstring& fileName,
         return result;
     }
 
+    Stream dataStream;
+    std::vector<std::uint8_t> data;
+    if (SUCCEEDED(openStream(L"Data", &dataStream.p)))
+    {
+        std::uint64_t dataSize = 0;
+        if (GetStreamSize(dataStream.p, dataSize) && dataSize <= options.maxStreamBytes)
+            ReadVector(dataStream.p, 0, dataSize, options.maxStreamBytes, data);
+    }
+
     std::vector<Piece> pieces;
     if (!ParsePieceTable(table, fib.fcClx, fib.lcbClx, pieces, result.error))
     {
@@ -531,9 +752,33 @@ Result ConvertToRtf(const std::wstring& fileName,
         }
     }
 
-    // Normalize Word's common paragraph/line separators. Do not remove the
-    // final paragraph mark: Rich Edit handles a trailing \par correctly.
-    std::wstring rtfText = MakeRtf(text, options.emitObjectPlaceholders);
+    // Resolve inline picture characters (U+0001) through CHPX FKP records.
+    // sprmCPicLocation (0x6A03) points into the Data stream to PICFAndOfficeArtData.
+    std::unordered_map<std::uint32_t, Picture> pictures;
+    std::vector<ChpxRun> chpxRuns;
+    if (!data.empty() && ParseChpxRuns(word, table, fib, chpxRuns))
+    {
+        for (std::uint32_t cp = 0; cp < text.size(); ++cp)
+        {
+            if (text[cp] != 0x0001) continue;
+            const auto pieceIt = std::find_if(pieces.begin(), pieces.end(),
+                [cp](const Piece& piece) { return cp >= piece.cpStart && cp < piece.cpEnd; });
+            if (pieceIt == pieces.end()) continue;
+            const std::uint64_t delta = std::uint64_t(cp - pieceIt->cpStart);
+            const std::uint64_t fc64 = std::uint64_t(pieceIt->fc) + delta * (pieceIt->compressed ? 1u : 2u);
+            if (fc64 > 0xFFFFFFFFu) continue;
+            const std::uint32_t fc = static_cast<std::uint32_t>(fc64);
+            const auto runIt = std::find_if(chpxRuns.begin(), chpxRuns.end(),
+                [fc](const ChpxRun& run) { return fc >= run.fcFirst && fc < run.fcLim; });
+            if (runIt == chpxRuns.end()) continue;
+            Picture picture;
+            if (FindPictureBytes(data, runIt->picLocation, options.maxImageBytes, picture))
+                pictures.emplace(cp, std::move(picture));
+        }
+    }
+
+    // Rich Edit accepts PNG/JPEG payloads directly in RTF pict groups.
+    std::wstring rtfText = MakeRtf(text, pictures, options.emitObjectPlaceholders);
     if (!WideToUtf8Bytes(rtfText, rtf))
     {
         result.error = L"Failed to encode generated RTF.";
@@ -544,9 +789,10 @@ Result ConvertToRtf(const std::wstring& fileName,
     result.success = true;
     result.charactersRead = text.size();
     result.pieceCount = static_cast<std::uint32_t>(pieces.size());
-    result.warnings.push_back(
-        L"This first version extracts document text and paragraph structure. "
-        L"Character/paragraph formatting and real embedded-picture extraction are not implemented yet.");
+    result.imagesRead = static_cast<std::uint32_t>(pictures.size());
+    if (pictures.size() < std::count(text.begin(), text.end(), wchar_t(0x0001)))
+        result.warnings.push_back(L"Some inline pictures could not be decoded. This implementation currently embeds PNG and JPEG picture payloads; floating pictures and other OfficeArt formats are not handled.");
+    result.warnings.push_back(L"Character/paragraph formatting, floating pictures, and complex OfficeArt objects are not implemented yet.");
 
     if (uninitialize)
         CoUninitialize();
