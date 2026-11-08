@@ -27,7 +27,7 @@ const TCHAR szRegKey[] = _T("Microsoft\\MFC\\Samples");
 const TCHAR szTextSection[] = _T("Text");
 const TCHAR szRTFSection[] = _T("RTF");
 const TCHAR szWordSection[] = _T("Word6");
-const TCHAR szWriteSection[] =_T("Write");
+const TCHAR szDocxSection[] = _T("Docx");
 const TCHAR szIPSection[] = _T("IP");
 const TCHAR szWrap[] = _T("Wrap");
 const TCHAR szPageMargin[] = _T("PageMargin");
@@ -41,6 +41,5 @@ const TCHAR szMaximized[] = _T("Maximized");
 const TCHAR szSumInfo[] = _T("\005SummaryInformation");
 
 const char szWordConverter[] = "MSWD6_32.WPC";
-const char szWriteConverter[] = "WRITE32.WPC";
 
 const TCHAR szContents[] = _T("Contents");

@@ -28,7 +28,7 @@ static char BASED_CODE THIS_FILE[] = __FILE__;
 COptionSheet::COptionSheet(UINT nIDCaption, CWnd* pParentWnd, UINT iSelectPage)
 	: CCSPropertySheet(nIDCaption, pParentWnd, iSelectPage),
 	pageText(IDS_TEXT_OPTIONS), pageRTF(IDS_RTF_OPTIONS),
-	pageWord(IDS_WORD6_OPTIONS), pageWrite(IDS_WRITE_OPTIONS),
+	pageWord(IDS_WORD6_OPTIONS), pageDocx(IDS_DOCX_OPTIONS),
 	pageEmbedded()
 {
 	units.m_nUnits = theApp.GetUnits();
@@ -36,19 +36,19 @@ COptionSheet::COptionSheet(UINT nIDCaption, CWnd* pParentWnd, UINT iSelectPage)
 	pageText.m_nWordWrap = theApp.GetDocOptions(RD_TEXT).m_nWordWrap;
 	pageRTF.m_nWordWrap = theApp.GetDocOptions(RD_RICHTEXT).m_nWordWrap;
 	pageWord.m_nWordWrap = theApp.GetDocOptions(RD_WINWORD6).m_nWordWrap;
-	pageWrite.m_nWordWrap = theApp.GetDocOptions(RD_WRITE).m_nWordWrap;
+	pageDocx.m_nWordWrap = theApp.GetDocOptions(RD_DOCX).m_nWordWrap;
 	pageEmbedded.m_nWordWrap = theApp.GetDocOptions(RD_EMBEDDED).m_nWordWrap;
 	SetPageButtons(pageText, theApp.GetDockState(RD_TEXT));
 	SetPageButtons(pageRTF, theApp.GetDockState(RD_RICHTEXT));
 	SetPageButtons(pageWord, theApp.GetDockState(RD_WINWORD6));
-	SetPageButtons(pageWrite, theApp.GetDockState(RD_WRITE));
+	SetPageButtons(pageDocx, theApp.GetDockState(RD_DOCX));
 	SetPageButtons(pageEmbedded, theApp.GetDockState(RD_EMBEDDED));
 	SetPageButtons(pageEmbedded, theApp.GetDockState(RD_EMBEDDED, FALSE));
 	AddPage(&units);
 	AddPage(&pageText);
 	AddPage(&pageRTF);
 	AddPage(&pageWord);
-	AddPage(&pageWrite);
+	AddPage(&pageDocx);
 	AddPage(&pageEmbedded);
 }
 
@@ -132,7 +132,7 @@ INT_PTR COptionSheet::DoModal()
 		SetState(pageText, theApp.GetDockState(RD_TEXT));
 		SetState(pageRTF, theApp.GetDockState(RD_RICHTEXT));
 		SetState(pageWord, theApp.GetDockState(RD_WINWORD6));
-		SetState(pageWrite, theApp.GetDockState(RD_WRITE));
+		SetState(pageDocx, theApp.GetDockState(RD_DOCX));
 		SetState(pageEmbedded, theApp.GetDockState(RD_EMBEDDED));
 		SetState(pageEmbedded, theApp.GetDockState(RD_EMBEDDED, FALSE));
 		theApp.SetUnits(units.m_nUnits);
@@ -140,7 +140,7 @@ INT_PTR COptionSheet::DoModal()
 		theApp.GetDocOptions(RD_TEXT).m_nWordWrap = pageText.m_nWordWrap;
 		theApp.GetDocOptions(RD_RICHTEXT).m_nWordWrap = pageRTF.m_nWordWrap;
 		theApp.GetDocOptions(RD_WINWORD6).m_nWordWrap = pageWord.m_nWordWrap;
-		theApp.GetDocOptions(RD_WRITE).m_nWordWrap = pageWrite.m_nWordWrap;
+		theApp.GetDocOptions(RD_DOCX).m_nWordWrap = pageDocx.m_nWordWrap;
 		theApp.GetDocOptions(RD_EMBEDDED).m_nWordWrap = pageEmbedded.m_nWordWrap;
 	}
 	return nRes;

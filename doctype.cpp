@@ -23,10 +23,7 @@ static char BASED_CODE THIS_FILE[] = __FILE__;
 #endif
 
 static const BYTE byteRTFPrefix[5] = {'{', '\\', 'r', 't', 'f'};
-static const BYTE byteWord2Prefix[4] = {0xDB, 0xA5, 0x2D, 0x00};
 static const BYTE byteCompFilePrefix[8] = {0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1};
-static const BYTE byteWrite1Prefix[2] = {0x31, 0xBE};
-static const BYTE byteWrite2Prefix[2] = {0x32, 0xBE};
 static const BYTE byteExePrefix[2] = {0x4D, 0x5A};
 
 /////////////////////////////////////////////////////////////////////////////
@@ -41,7 +38,7 @@ DocType doctypes[NUM_DOC_TYPES] =
 	DECLARE_DOCTYPE(WINWORD, TRUE, FALSE, FALSE, NULL),
 	DECLARE_DOCTYPE(WINWORD6, TRUE, FALSE, TRUE, szWordConverter),
 	DECLARE_DOCTYPE_SYN(WORDPAD, WINWORD6, TRUE, TRUE, FALSE, szWordConverter),
-	DECLARE_DOCTYPE(WRITE, TRUE, FALSE, FALSE, szWriteConverter),
+	DECLARE_DOCTYPE(DOCX, TRUE, FALSE, FALSE, NULL),
 	DECLARE_DOCTYPE(RICHTEXT, TRUE, TRUE, FALSE, NULL),
 	DECLARE_DOCTYPE(TEXT, TRUE, TRUE, FALSE, NULL),
 	DECLARE_DOCTYPE(OEMTEXT, TRUE, TRUE, FALSE, NULL),
@@ -126,10 +123,13 @@ int GetDocTypeFromName(LPCTSTR pszPathName, CFileException& fe)
 
 	if (stat.m_size == 0) // file is empty
 	{
-		CString ext = CString(pszPathName).Right(4);
-		if (ext[0] != '.')
-			return RD_TEXT;
-		if (_tcsicmp(ext, _T(".doc"))==0)
+		CString ext = pszPathName;
+		int dot = ext.ReverseFind(_T('.'));
+		if (dot >= 0) ext = ext.Mid(dot);
+		else ext.Empty();
+		if (_tcsicmp(ext, _T(".docx")) == 0)
+			return RD_DOCX;
+		if (_tcsicmp(ext, _T(".doc")) == 0)
 			return RD_WORDPAD;
 		if (_tcsicmp(ext, _T(".rtf"))==0)
 			return RD_RICHTEXT;
@@ -144,22 +144,12 @@ int GetDocTypeFromName(LPCTSTR pszPathName, CFileException& fe)
 	// EXE
 	if (IsLeadMatch(file, byteExePrefix, sizeof(byteExePrefix)))
 		return RD_EXE;
-	// write file can start with 31BE or 32BE depending on whether it has
-	// OLE objects in it or not
-	if (IsLeadMatch(file, byteWrite1Prefix, sizeof(byteWrite1Prefix)) ||
-		IsLeadMatch(file, byteWrite2Prefix, sizeof(byteWrite2Prefix)))
-	{
-		file.Close();
-#ifdef CONVERTERS
-		if (IsConverterFormat(szWriteConverter, pszPathName))
-			return RD_WRITE;
-		else
-#endif
-			return RD_TEXT;
-	}
-
     {
-        CString ext = CString(pszPathName).Right(4);
+        CString ext = pszPathName;
+        int dot = ext.ReverseFind(_T('.'));
+        if (dot >= 0) ext = ext.Mid(dot); else ext.Empty();
+        if (_tcsicmp(ext, _T(".docx")) == 0)
+            return RD_DOCX;
         if (_tcsicmp(ext, _T(".doc")) == 0)
             return RD_WINWORD;
     }

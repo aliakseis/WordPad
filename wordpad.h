@@ -67,7 +67,7 @@ public:
 	CDocOptions m_optionsText;
 	CDocOptions m_optionsRTF;
 	CDocOptions m_optionsWord; //wrap to ruler
-	CDocOptions m_optionsWrite; //wrap to ruler
+	CDocOptions m_optionsDocx; //wrap to ruler
 	CDocOptions m_optionsIP;    //wrap to ruler
 	CDocOptions m_optionsNull;
 	CList<HWND, HWND> m_listPrinterNotify;

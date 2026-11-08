@@ -32,6 +32,7 @@
 #include "multconv.h"
 
 #include "DocReader.h"
+#include "DocxReader.h"
 
 #ifdef _DEBUG
 #undef THIS_FILE
@@ -431,23 +432,37 @@ CWordPadView* CWordPadDoc::GetView()
 /////////////////////////////////////////////////////////////////////////////
 // CWordPadDoc Operations
 
+
+template<class Reader>
+static CFile* LoadConvertedRtf(LPCTSTR pszPathName, Reader reader)
+{
+    std::vector<std::uint8_t> rtf;
+    const auto result = reader(std::wstring(pszPathName), rtf);
+    if (!result.success)
+    {
+        if (!result.error.empty())
+            AfxMessageBox(result.error.c_str());
+        return NULL;
+    }
+    return new CVectorMemFile(std::move(rtf));
+}
+
 CFile* CWordPadDoc::GetFile(LPCTSTR pszPathName, UINT nOpenFlags, CFileException* pException)
 {
 	// if writing use current doc type otherwise use new doc type
 	int nType = (nOpenFlags & CFile::modeReadWrite) ? m_nDocType : m_nNewDocType;
 
     if (nType == RD_WINWORD)
-    {
-        std::vector<std::uint8_t> rtf;
-        auto result = docreader::ConvertToRtf(pszPathName, rtf);
-        if (!result.success)
-        {
-            if (!result.error.empty())
-                AfxMessageBox(result.error.c_str());
-            return NULL;
-        }
-        return new CVectorMemFile(std::move(rtf));
-    }
+        return LoadConvertedRtf(pszPathName,
+            [](const std::wstring& name, std::vector<std::uint8_t>& rtf) {
+                return docreader::ConvertToRtf(name, rtf);
+            });
+
+    if (nType == RD_DOCX)
+        return LoadConvertedRtf(pszPathName,
+            [](const std::wstring& name, std::vector<std::uint8_t>& rtf) {
+                return docxreader::ConvertToRtf(name, rtf);
+            });
 
     CTrackFile* pFile = NULL;
     CFrameWnd* pWnd = GetView()->GetParentFrame();
@@ -533,7 +548,7 @@ void CWordPadDoc::OnViewOptions()
 		nFirstPage = 1;
 	else if (nType == RD_RICHTEXT)
 		nFirstPage = 2;
-	else if (nType == RD_WRITE)
+	else if (nType == RD_DOCX)
 		nFirstPage = 4;
 	else if (nType == RD_EMBEDDED)
 		nFirstPage = 5;

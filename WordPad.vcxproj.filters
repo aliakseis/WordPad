@@ -108,6 +108,9 @@
     <ClCompile Include="DocReader.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="DocxReader.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="AppLookDlg.h">
@@ -215,6 +218,9 @@
     <ClInclude Include="DocReader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="DocxReader.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="res\bitmap1.bmp">
@@ -296,9 +302,6 @@
       <Filter>Resource Files</Filter>
     </None>
     <None Include="res\wordpad.rc2">
-      <Filter>Resource Files</Filter>
-    </None>
-    <None Include="res\write.ico">
       <Filter>Resource Files</Filter>
     </None>
     <None Include="ReadMe.htm" />

@@ -1261,6 +1261,7 @@
     <ClCompile Include="ddxm.cpp" />
     <ClCompile Include="docopt.cpp" />
     <ClCompile Include="DocReader.cpp" />
+    <ClCompile Include="DocxReader.cpp" />
     <ClCompile Include="doctype.cpp" />
     <ClCompile Include="filenewd.cpp" />
     <ClCompile Include="formatba.cpp" />
@@ -1319,6 +1320,7 @@
     <ClInclude Include="ddxm.h" />
     <ClInclude Include="docopt.h" />
     <ClInclude Include="DocReader.h" />
+    <ClInclude Include="DocxReader.h" />
     <ClInclude Include="doctype.h" />
     <ClInclude Include="filenewd.h" />
     <ClInclude Include="formatba.h" />
@@ -1378,7 +1380,6 @@
     <None Include="res\wordp48.bmp" />
     <None Include="res\wordpad.ico" />
     <None Include="res\wordpad.rc2" />
-    <None Include="res\write.ico" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="wordpad.rc" />

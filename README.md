@@ -296,3 +296,8 @@ The original sample focuses on illustrating concepts rather than production-read
 Please refer to the original project for licensing information.
 
 This repository is based on Microsoft's educational MFC sample and preserves its purpose as a demonstration of MFC application development.
+
+
+### DOCX import
+
+The Open dialog supports read-only import of `.docx` files. The importer converts the main document body to an in-memory RTF stream for Rich Edit. It handles paragraphs, basic run formatting, alignment, simple tables, external hyperlinks, and embedded PNG/JPEG images. It uses the Windows ZIP-folder shell namespace and MSXML 6; no Office installation is required. Headers/footers, numbering, floating objects, advanced layout, charts, and unsupported image formats are not currently reconstructed.
