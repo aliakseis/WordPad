@@ -48,7 +48,7 @@
 #define IDB_RULER_BLOCKM                132
 #define IDS_WINWORD6_DOC                133
 #define IDB_RULER_DOWN                  133
-#define IDS_WINWORD2_DOC                134
+#define IDS_WINWORD_DOC                134
 #define IDB_RULER_DOWNM                 134
 #define IDB_RULER_TAB                   135
 #define IDS_EXE_DOC                     135

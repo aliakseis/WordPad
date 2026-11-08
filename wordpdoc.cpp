@@ -436,7 +436,7 @@ CFile* CWordPadDoc::GetFile(LPCTSTR pszPathName, UINT nOpenFlags, CFileException
 	// if writing use current doc type otherwise use new doc type
 	int nType = (nOpenFlags & CFile::modeReadWrite) ? m_nDocType : m_nNewDocType;
 
-    if (nType == RD_WINWORD2)
+    if (nType == RD_WINWORD)
     {
         std::vector<std::uint8_t> rtf;
         auto result = docreader::ConvertToRtf(pszPathName, rtf);

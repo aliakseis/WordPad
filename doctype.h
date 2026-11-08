@@ -11,7 +11,7 @@
 // See these sources for detailed information regarding the
 // Microsoft Foundation Classes product.
 
-#define RD_WINWORD2 0
+#define RD_WINWORD 0
 #define RD_WINWORD6 1
 #define RD_WORDPAD 2
 #define RD_WRITE 3

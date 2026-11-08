@@ -38,7 +38,7 @@ static BOOL IsWord6(LPCTSTR pszConverter, LPCTSTR pszPathName);
 
 DocType doctypes[NUM_DOC_TYPES] =
 {
-	DECLARE_DOCTYPE(WINWORD2, TRUE, FALSE, FALSE, NULL),
+	DECLARE_DOCTYPE(WINWORD, TRUE, FALSE, FALSE, NULL),
 	DECLARE_DOCTYPE(WINWORD6, TRUE, FALSE, TRUE, szWordConverter),
 	DECLARE_DOCTYPE_SYN(WORDPAD, WINWORD6, TRUE, TRUE, FALSE, szWordConverter),
 	DECLARE_DOCTYPE(WRITE, TRUE, FALSE, FALSE, szWriteConverter),
@@ -140,7 +140,7 @@ int GetDocTypeFromName(LPCTSTR pszPathName, CFileException& fe)
 		return RD_RICHTEXT;
 	// WORD 2
 	//if (IsLeadMatch(file, byteWord2Prefix, sizeof(byteWord2Prefix)))
-	//	return RD_WINWORD2;
+	//	return RD_WINWORD;
 	// EXE
 	if (IsLeadMatch(file, byteExePrefix, sizeof(byteExePrefix)))
 		return RD_EXE;
@@ -161,7 +161,7 @@ int GetDocTypeFromName(LPCTSTR pszPathName, CFileException& fe)
     {
         CString ext = CString(pszPathName).Right(4);
         if (_tcsicmp(ext, _T(".doc")) == 0)
-            return RD_WINWORD2;
+            return RD_WINWORD;
     }
 
 	// test for compound file
