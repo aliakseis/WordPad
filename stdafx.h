@@ -28,6 +28,8 @@
 #include <afxrich.h>
 #pragma warning (default : 4189)
 
+#include <algorithm>
+
 #define HORZ_TEXTOFFSET 15
 #define VERT_TEXTOFFSET 5
 

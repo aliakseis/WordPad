@@ -980,7 +980,7 @@ void CWordPadView::GetDocumentColors (CList<COLORREF,COLORREF>& lstColors)
 
 	wndRichEdit.HideSelection (TRUE, FALSE);
 
-	int nTextLen = min (500, wndRichEdit.GetTextLength ());
+	int nTextLen = std::min (500l, wndRichEdit.GetTextLength ());
 		// For demonstration purposes only!
 
 	for (long iSel = 0; iSel < nTextLen; iSel += 2)

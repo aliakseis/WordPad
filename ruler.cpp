@@ -258,7 +258,7 @@ int CComboRulerItem::GetMin()
 	{
 		int nPDist = GetHorzPosTwips() - CRulerItem::GetMin();
 		int nLDist = m_link.GetHorzPosTwips() - m_link.GetMin();
-		return GetHorzPosTwips() - min(nPDist, nLDist);
+		return GetHorzPosTwips() - std::min(nPDist, nLDist);
 	}
 	else
 		return CRulerItem::GetMin();
@@ -858,8 +858,8 @@ void CRulerBar::OnWindowPosChanging(WINDOWPOS FAR* lpwndpos)
 	CPane::OnWindowPosChanging(lpwndpos);
 	CRect rect;
 	GetClientRect(rect);
-	int minx = min(rect.Width(), lpwndpos->cx);
-	int maxx = max(rect.Width(), lpwndpos->cx);
+	int minx = std::min(rect.Width(), lpwndpos->cx);
+	int maxx = std::max(rect.Width(), lpwndpos->cx);
 	rect.SetRect(minx-2, rect.bottom - 6, minx, rect.bottom);
 	InvalidateRect(rect);
 	rect.SetRect(maxx-2, rect.bottom - 6, maxx, rect.bottom);

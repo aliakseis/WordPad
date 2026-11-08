@@ -361,6 +361,7 @@ CDocOptions& CWordPadApp::GetDocOptions(int nDocType)
 {
 	switch (nDocType)
 	{
+		case RD_WINWORD:
 		case RD_WINWORD6:
 		case RD_WORDPAD:
 			return m_optionsWord;

@@ -11,6 +11,8 @@
 // See these sources for detailed information regarding the
 // Microsoft Foundation Classes product.
 
+#include <vector>
+
 #ifdef CONVERTERS
 
 /////////////////////////////////////////////////////////////////////////////
@@ -56,6 +58,22 @@ public:
 	COEMFile(CFrameWnd* pWnd);
 	virtual UINT Read(void FAR* lpBuf, UINT nCount);
 	virtual void Write(const void FAR* lpBuf, UINT nCount);
+};
+
+class CVectorMemFile : public CMemFile
+{
+public:
+    explicit CVectorMemFile(std::vector<std::uint8_t>&& data)
+        : CMemFile(nullptr, 0)
+        , m_storage(std::move(data))
+    {
+        Attach(
+            m_storage.empty() ? nullptr : m_storage.data(),
+            static_cast<UINT>(m_storage.size()));
+    }
+
+private:
+    std::vector<std::uint8_t> m_storage;
 };
 
 #ifdef CONVERTERS
