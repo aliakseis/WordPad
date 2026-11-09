@@ -425,7 +425,7 @@ namespace docxreader {
             if (!out.empty()) out += L"\\"; out += p; }
                 return out;
         }
-        std::wstring RtfText(const std::wstring & text)
+        std::wstring RtfText(const std::wstring& text)
         {
             std::wstring out;
             for (size_t i = 0; i < text.size(); ++i) {
@@ -438,7 +438,17 @@ namespace docxreader {
                 else if (c <= 0x7f) out += c;
                 else {
                     int value = (short)c;
-                    out += L"\\u" + std::to_wstring(value) + L"?";
+
+                    wchar_t nextChar = (i + 1 < text.size()) ? text[i + 1] : L'\0';
+
+                    if (nextChar >= L'0' && nextChar <= L'9') {
+                        out += L"\\u" + std::to_wstring(value) + nextChar;
+
+                        ++i;
+                    }
+                    else {
+                        out += L"\\u" + std::to_wstring(value) + L"?";
+                    }
                 }
             }
             return out;
@@ -532,7 +542,9 @@ namespace docxreader {
                         else if (name == L"u" && Attr(property.p, L"val") != L"none" && Attr(property.p, L"val") != L"0") rtf += L"\\ul";
                         else if (name == L"sz") {
                             auto value = Attr(property.p, L"val");
-                            if (!value.empty()) rtf += L"\\fs" + value;
+                            if (!value.empty()) {
+                                rtf += L"\\fs" + value + L" ";
+                            }
                         }
                     }
                 }
