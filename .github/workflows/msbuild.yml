@@ -14,18 +14,17 @@ jobs:
           - configuration: "Unicode Release Static"
             platform: "Win32"
             artifact: "WordPad-Win32"
-            triplet: "x86-windows-static" # Explicitly match Win32 Static
+            triplet: "x86-windows-static"
 
           - configuration: "Unicode Release Static"
             platform: "x64"
             artifact: "WordPad-x64"
-            triplet: "x64-windows-static" # Explicitly match x64 Static
+            triplet: "x64-windows-static"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 1. Export GitHub Actions cache environment variables for vcpkg
       - name: Export GitHub Actions cache environment variables
         uses: actions/github-script@v7
         with:
@@ -33,13 +32,11 @@ jobs:
             core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
 
-      # 2. Enable native GitHub Actions binary caching for vcpkg
       - name: Configure vcpkg Binary Caching
         shell: bash
         run: |
           echo "VCPKG_BINARY_SOURCES=clear;x-gha,readwrite" >> $GITHUB_ENV
 
-      # 3. Required for vcpkg when compiling x86/Win32 binaries on x64 host runners
       - name: Set vcpkg environment variables
         shell: bash
         run: |
@@ -48,10 +45,9 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      # 4. Inject vcpkg integration properties and the explicit triplet selection into MSBuild
       - name: Build WordPad.sln
         run: |
-          msbuild WordPad.sln /m /p:Configuration="${{ matrix.configuration }}" /p:Platform="${{ matrix.platform }}" /p:VcpkgPropsPath="${{ env.VCPKG_INSTALLATION_ROOT }}/scripts/buildsystems/msbuild/vcpkg.props" /p:VcpkgTargetsPath="${{ env.VCPKG_INSTALLATION_ROOT }}/scripts/buildsystems/msbuild/vcpkg.targets" /p:VcpkgTriplet="${{ matrix.triplet }}" /p:VcpkgAutoLink=true /p:VcpkgEnabled=true /p:ForceImportBeforeCppTargets="${{ env.VCPKG_INSTALLATION_ROOT }}/scripts/buildsystems/msbuild/vcpkg.props" /verbosity:minimal
+          msbuild WordPad.sln /m /p:Configuration="${{ matrix.configuration }}" /p:Platform="${{ matrix.platform }}" /p:VcpkgPropsPath="${{ env.VCPKG_INSTALLATION_ROOT }}/scripts/buildsystems/msbuild/vcpkg.props" /p:VcpkgTargetsPath="${{ env.VCPKG_INSTALLATION_ROOT }}/scripts/buildsystems/msbuild/vcpkg.targets" /p:CustomAfterMicrosoftCppProps="${{ env.VCPKG_INSTALLATION_ROOT }}/scripts/buildsystems/msbuild/vcpkg.props" /p:CustomAfterMicrosoftCppTargets="${{ env.VCPKG_INSTALLATION_ROOT }}/scripts/buildsystems/msbuild/vcpkg.targets" /p:VcpkgTriplet="${{ matrix.triplet }}" /p:VcpkgEnabled=true /p:VcpkgEnableManifest=true /verbosity:minimal
 
       - name: Upload binaries
         uses: actions/upload-artifact@v4
