@@ -51,7 +51,7 @@ jobs:
       # 4. Inject vcpkg integration properties and the explicit triplet selection into MSBuild
       - name: Build WordPad.sln
         run: |
-          msbuild WordPad.sln /m /p:Configuration="${{ matrix.configuration }}" /p:Platform="${{ matrix.platform }}" /p:VcpkgPropsPath="${{ env.VCPKG_INSTALLATION_ROOT }}/scripts/buildsystems/msbuild/vcpkg.props" /p:VcpkgTargetsPath="${{ env.VCPKG_INSTALLATION_ROOT }}/scripts/buildsystems/msbuild/vcpkg.targets" /p:VcpkgTriplet="${{ matrix.triplet }}" /verbosity:minimal
+          msbuild WordPad.sln /m /p:Configuration="${{ matrix.configuration }}" /p:Platform="${{ matrix.platform }}" /p:VcpkgPropsPath="${{ env.VCPKG_INSTALLATION_ROOT }}/scripts/buildsystems/msbuild/vcpkg.props" /p:VcpkgTargetsPath="${{ env.VCPKG_INSTALLATION_ROOT }}/scripts/buildsystems/msbuild/vcpkg.targets" /p:VcpkgTriplet="${{ matrix.triplet }}" /p:VcpkgAutoLink=true /p:VcpkgEnabled=true /p:ForceImportBeforeCppTargets="${{ env.VCPKG_INSTALLATION_ROOT }}/scripts/buildsystems/msbuild/vcpkg.props" /verbosity:minimal
 
       - name: Upload binaries
         uses: actions/upload-artifact@v4
