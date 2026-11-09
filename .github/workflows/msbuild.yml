@@ -47,7 +47,7 @@ jobs:
 
       - name: Build WordPad.sln
         shell: cmd
-        run: msbuild WordPad.sln /m /p:Configuration="${{ matrix.configuration }}" /p:Platform="${{ matrix.platform }}" /p:ForceImportBeforeCppTargets="${{ env.VCPKG_CTX_ROOT }}/scripts/buildsystems/msbuild/vcpkg.props" /p:IncludePath="${{ github.workspace }}\vcpkg_installed\${{ matrix.triplet }}\include;$(IncludePath)" /p:LibraryPath="${{ github.workspace }}\vcpkg_installed\${{ matrix.triplet }}\lib;$(LibraryPath)" /p:VcpkgTriplet="${{ matrix.triplet }}" /p:VcpkgManifestInstalledBaseDir="${{ github.workspace }}\vcpkg_installed\" /verbosity:minimal
+        run: msbuild WordPad.sln /m /p:Configuration="${{ matrix.configuration }}" /p:Platform="${{ matrix.platform }}" /p:ForceImportBeforeCppTargets="${{ env.VCPKG_CTX_ROOT }}\scripts\buildsystems\msbuild\vcpkg.props" /p:IncludePath="${{ github.workspace }}\vcpkg_installed\${{ matrix.triplet }}\include;$(IncludePath)" /p:LibraryPath="${{ github.workspace }}\vcpkg_installed\${{ matrix.triplet }}\lib;$(LibraryPath)" /p:VcpkgTriplet="${{ matrix.triplet }}" /p:VcpkgManifestInstalledBaseDir="${{ github.workspace }}\vcpkg_installed\\" /verbosity:minimal
 
       - name: Upload binaries
         uses: actions/upload-artifact@v4
