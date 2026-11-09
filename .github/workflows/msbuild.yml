@@ -37,17 +37,17 @@ jobs:
         run: |
           echo "VCPKG_BINARY_SOURCES=clear;x-gha,readwrite" >> $GITHUB_ENV
 
-      - name: Expose System VCPKG Root to GitHub Context
+      - name: Run manual vcpkg install
         shell: pwsh
         run: |
-          echo "VCPKG_CTX_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
-          echo "VCPKG_DEFAULT_TRIPLET=${{ matrix.triplet }}" >> $env:GITHUB_ENV
+          & "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" install --triplet ${{ matrix.triplet }} --x-manifest-root="${{ github.workspace }}"
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
       - name: Build WordPad.sln
-        run: msbuild WordPad.sln /m /p:Configuration="${{ matrix.configuration }}" /p:Platform="${{ matrix.platform }}" /p:VcpkgPropsPath="${{ env.VCPKG_CTX_ROOT }}/scripts/buildsystems/msbuild/vcpkg.props" /p:VcpkgTargetsPath="${{ env.VCPKG_CTX_ROOT }}/scripts/buildsystems/msbuild/vcpkg.targets" /p:CustomAfterMicrosoftCppProps="${{ env.VCPKG_CTX_ROOT }}/scripts/buildsystems/msbuild/vcpkg.props" /p:CustomAfterMicrosoftCppTargets="${{ env.VCPKG_CTX_ROOT }}/scripts/buildsystems/msbuild/vcpkg.targets" /p:VcpkgTriplet="${{ matrix.triplet }}" /p:VcpkgEnabled=true /p:VcpkgEnableManifest=true /verbosity:minimal
+        run: |
+          msbuild WordPad.sln /m /p:Configuration="${{ matrix.configuration }}" /p:Platform="${{ matrix.platform }}" /p:ForceImportBeforeCppTargets="${{ env.VCPKG_INSTALLATION_ROOT }}/scripts/buildsystems/msbuild/vcpkg.props" /p:IncludePath="${{ github.workspace }}/vcpkg_installed/${{ matrix.triplet }}/include;$(IncludePath)" /p:LibraryPath="${{ github.workspace }}/vcpkg_installed/${{ matrix.triplet }}/lib;$(LibraryPath)" /verbosity:minimal
 
       - name: Upload binaries
         uses: actions/upload-artifact@v4
