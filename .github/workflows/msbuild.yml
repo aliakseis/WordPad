@@ -46,8 +46,8 @@ jobs:
         uses: microsoft/setup-msbuild@v2
 
       - name: Build WordPad.sln
-        run: |
-          msbuild WordPad.sln /m /p:Configuration="${{ matrix.configuration }}" /p:Platform="${{ matrix.platform }}" /p:ForceImportBeforeCppTargets="${{ env.VCPKG_INSTALLATION_ROOT }}/scripts/buildsystems/msbuild/vcpkg.props" /p:IncludePath="${{ github.workspace }}/vcpkg_installed/${{ matrix.triplet }}/include;$(IncludePath)" /p:LibraryPath="${{ github.workspace }}/vcpkg_installed/${{ matrix.triplet }}/lib;$(LibraryPath)" /verbosity:minimal
+        shell: cmd
+        run: msbuild WordPad.sln /m /p:Configuration="${{ matrix.configuration }}" /p:Platform="${{ matrix.platform }}" /p:ForceImportBeforeCppTargets="${{ env.VCPKG_CTX_ROOT }}/scripts/buildsystems/msbuild/vcpkg.props" /p:IncludePath="${{ github.workspace }}\vcpkg_installed\${{ matrix.triplet }}\include;$(IncludePath)" /p:LibraryPath="${{ github.workspace }}\vcpkg_installed\${{ matrix.triplet }}\lib;$(LibraryPath)" /verbosity:minimal
 
       - name: Upload binaries
         uses: actions/upload-artifact@v4
