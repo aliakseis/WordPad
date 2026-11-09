@@ -47,7 +47,8 @@ jobs:
 
       - name: Build WordPad.sln
         run: |
-          msbuild WordPad.sln /m /p:Configuration="${{ matrix.configuration }}" /p:Platform="${{ matrix.platform }}" /p:VcpkgPropsPath="${{ env.VCPKG_INSTALLATION_ROOT }}/scripts/buildsystems/msbuild/vcpkg.props" /p:VcpkgTargetsPath="${{ env.VCPKG_INSTALLATION_ROOT }}/scripts/buildsystems/msbuild/vcpkg.targets" /p:CustomAfterMicrosoftCppProps="${{ env.VCPKG_INSTALLATION_ROOT }}/scripts/buildsystems/msbuild/vcpkg.props" /p:CustomAfterMicrosoftCppTargets="${{ env.VCPKG_INSTALLATION_ROOT }}/scripts/buildsystems/msbuild/vcpkg.targets" /p:VcpkgTriplet="${{ matrix.triplet }}" /p:VcpkgEnabled=true /p:VcpkgEnableManifest=true /verbosity:minimal
+          $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
+          msbuild WordPad.sln /m /p:Configuration="${{ matrix.configuration }}" /p:Platform="${{ matrix.platform }}" /p:VcpkgPropsPath="$vcpkgRoot/scripts/buildsystems/msbuild/vcpkg.props" /p:VcpkgTargetsPath="$vcpkgRoot/scripts/buildsystems/msbuild/vcpkg.targets" /p:CustomAfterMicrosoftCppProps="$vcpkgRoot/scripts/buildsystems/msbuild/vcpkg.props" /p:CustomAfterMicrosoftCppTargets="$vcpkgRoot/scripts/buildsystems/msbuild/vcpkg.targets" /p:VcpkgTriplet="${{ matrix.triplet }}" /p:VcpkgEnabled=true /p:VcpkgEnableManifest=true /verbosity:minimal
 
       - name: Upload binaries
         uses: actions/upload-artifact@v4
