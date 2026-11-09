@@ -30,7 +30,6 @@ IDR_MAINFRAME           ICON                    "RES\\WORDPAD.ICO"
 
 IDI_ICON_DOC            ICON                    "RES\\RTFDOC.ICO"
 
-IDI_ICON_WRITE          ICON                    "res\\write.ico"
 
 IDI_ICON_TEXT           ICON                    "res\\textdoc.ico"
 
@@ -775,7 +774,7 @@ BEGIN
     IDR_MAINFRAME           "WordPad\nDocument\nWordPad Document\nWord for Windows 6.0 (*.doc)\n.DOC\nWordPad.Document.1\nWordPad Document"
     IDS_TEXT_DOC            "Text Document\nText Documents (*.txt)\n*.txt\nText Document"
     IDS_RICHTEXT_DOC        "Rich Text Format (RTF)\nRich Text Format (*.rtf)\n*.rtf\nRich Text Document"
-    IDS_WRITE_DOC           "Windows Write\nWindows Write (*.wri)\n*.wri\nWrite Document"
+    IDS_DOCX_DOC           "Word Open XML Document\nWord Open XML Documents (*.docx)\n*.docx\nWordPad.OpenXML.Document.1"
     IDS_ALL_DOC             "All\nAll Documents (*.*)\n*.*"
     IDS_WINWORD6_DOC        "Word for Windows 6.0\nWord for Windows 6.0 (*.doc)\n*.doc\nWord Document"
     IDS_WINWORD_DOC        "Word for Windows\nWord for Windows (*.doc)\n*.doc"
@@ -1004,7 +1003,7 @@ BEGIN
     IDS_RTF_OPTIONS         "Rich Text"
     IDS_WORD6_OPTIONS       "Word 6"
     IDS_OPTIONS             "Options"
-    IDS_WRITE_OPTIONS       "Write"
+    IDS_DOCX_OPTIONS       "Word Open XML"
     IDS_EMBEDDED_OPTIONS    "Embedded"
     IDS_TEXT_DOCUMENT       "Text Document"
     IDS_RTF_DOCUMENT        "Rich Text Document"

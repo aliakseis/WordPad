@@ -42,7 +42,7 @@
 #define IDS_TEXT_DOC                    129
 #define IDS_RICHTEXT_DOC                130
 #define IDB_BITMAP_TT                   130
-#define IDS_WRITE_DOC                   131
+#define IDS_DOCX_DOC                   131
 #define IDB_RULER_BLOCK                 131
 #define IDS_ALL_DOC                     132
 #define IDB_RULER_BLOCKM                132
@@ -84,7 +84,6 @@
 #define IDS_DT6                         154
 #define IDI_ICON_DOC                    154
 #define IDS_DT7                         155
-#define IDI_ICON_WRITE                  155
 #define IDS_DT8                         156
 #define IDS_DT9                         157
 #define IDS_DT10                        158
@@ -128,7 +127,7 @@
 #define IDS_WORD6_OPTIONS               185
 #define IDS_OPTIONS                     186
 #define IDR_TOOLBAR_IMAGES_HC           186
-#define IDS_WRITE_OPTIONS               187
+#define IDS_DOCX_OPTIONS               187
 #define IDB_MAINFRAME_HC                187
 #define IDS_EMBEDDED_OPTIONS            188
 #define IDB_TASKS_HC                    188

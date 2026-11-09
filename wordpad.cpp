@@ -100,7 +100,7 @@ void CWordPadCommandLineInfo::ParseParam(const char* pszParam,BOOL bFlag,BOOL bL
 CWordPadApp::CWordPadApp() : 
 	CWinAppEx (TRUE),
 	m_optionsText(0), m_optionsRTF(1),
-	m_optionsWord(2), m_optionsWrite(2), m_optionsIP(2), m_optionsNull(0)
+	m_optionsWord(2), m_optionsDocx(2), m_optionsIP(2), m_optionsNull(0)
 {
 	_tsetlocale(LC_ALL, _T(""));
 
@@ -370,8 +370,8 @@ CDocOptions& CWordPadApp::GetDocOptions(int nDocType)
 		case RD_TEXT:
 		case RD_OEMTEXT:
 			return m_optionsText;
-		case RD_WRITE:
-			return m_optionsWrite;
+		case RD_DOCX:
+			return m_optionsDocx;
 		case RD_EMBEDDED:
 			return m_optionsIP;
 	}
@@ -396,7 +396,7 @@ void CWordPadApp::SaveOptions()
 	m_optionsText.SaveOptions(szTextSection);
 	m_optionsRTF.SaveOptions(szRTFSection);
 	m_optionsWord.SaveOptions(szWordSection);
-	m_optionsWrite.SaveOptions(szWriteSection);
+	m_optionsDocx.SaveOptions(szDocxSection);
 	m_optionsIP.SaveOptions(szIPSection);
 }
 
@@ -446,7 +446,7 @@ void CWordPadApp::LoadOptions()
 	m_optionsText.LoadOptions(szTextSection);
 	m_optionsRTF.LoadOptions(szRTFSection);
 	m_optionsWord.LoadOptions(szWordSection);
-	m_optionsWrite.LoadOptions(szWriteSection);
+	m_optionsDocx.LoadOptions(szDocxSection);
 	m_optionsIP.LoadOptions(szIPSection);
 }
 
@@ -733,11 +733,6 @@ static const LPCTSTR rglpszWordPadOverwrite[] =
 //static const LPCTSTR rglpszExtOverwrite[] =
 //{sz01, sz16, sz17, sz21, NULL};
 
-static const LPCTSTR rglpszWriExtRegister[] =
-{sz18, NULL};
-static const LPCTSTR rglpszWriRegister[] =
-{sz00, sz01, sz16, sz17, sz20, sz21, NULL};
-
 static const LPCTSTR rglpszRtfExtRegister[] =
 {sz18, sz23, NULL};
 static const LPCTSTR rglpszRtfRegister[] =
@@ -829,9 +824,9 @@ void CWordPadApp::UpdateRegistry()
 //      (LPCTSTR*)rglpszTxtExtRegister, (LPCTSTR*)rglpszTxtRegister, 3);
 	RegisterExt(_T(".rtf"), _T("rtffile"), IDS_RICHTEXT_DOC, rglpszSymbols,
 		(LPCTSTR*)rglpszRtfExtRegister, (LPCTSTR*)rglpszRtfRegister, 1);
-	RegisterExt(_T(".wri"), _T("wrifile"), IDS_WRITE_DOC, rglpszSymbols,
-		(LPCTSTR*)rglpszWriExtRegister, (LPCTSTR*)rglpszWriRegister, 2);
 	RegisterExt(_T(".doc"), _T("WordPad.Document.1"), IDS_WINWORD6_DOC, rglpszSymbols,
+		(LPCTSTR*)rglpszDocExtRegister, (LPCTSTR*)rglpszDocRegister, 1);
+	RegisterExt(_T(".docx"), _T("WordPad.OpenXML.Document.1"), IDS_DOCX_DOC, rglpszSymbols,
 		(LPCTSTR*)rglpszDocExtRegister, (LPCTSTR*)rglpszDocRegister, 1);
 
 	// free memory for class ID

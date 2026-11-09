@@ -363,3 +363,5 @@ MigrationBackup/
 FodyWeavers.xsd
 
 Unicode Release Static/
+
+vcpkg_installed/

@@ -26,7 +26,7 @@ public:
 	CDocOptPage pageText;
 	CDocOptPage pageRTF;
 	CDocOptPage pageWord;
-	CDocOptPage pageWrite;
+	CDocOptPage pageDocx;
 	CEmbeddedOptPage pageEmbedded;
 
 // Operations

@@ -14,21 +14,40 @@ jobs:
           - configuration: "Unicode Release Static"
             platform: "Win32"
             artifact: "WordPad-Win32"
+            triplet: "x86-windows-static"
 
           - configuration: "Unicode Release Static"
             platform: "x64"
             artifact: "WordPad-x64"
+            triplet: "x64-windows-static"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Export GitHub Actions cache environment variables
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Configure vcpkg Binary Caching
+        shell: bash
+        run: |
+          echo "VCPKG_BINARY_SOURCES=clear;x-gha,readwrite" >> $GITHUB_ENV
+
+      - name: Integrate vcpkg globally
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" integrate install
+
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
       - name: Build WordPad.sln
-        run: |
-          msbuild WordPad.sln /m /p:Configuration="${{ matrix.configuration }}" /p:Platform="${{ matrix.platform }}" /verbosity:minimal
+        shell: cmd
+        run: msbuild WordPad.sln /m /p:Configuration="${{ matrix.configuration }}" /p:Platform="${{ matrix.platform }}" /p:VcpkgTriplet="${{ matrix.triplet }}" /verbosity:minimal
 
       - name: Upload binaries
         uses: actions/upload-artifact@v4

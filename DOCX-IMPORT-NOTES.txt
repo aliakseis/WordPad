@@ -1,0 +1,30 @@
+DOCX importer update
+====================
+
+The DOCX importer reads ZIP packages directly in-process using zlib. It does
+not use Shell.Application, IDispatch::Invoke, Folder.CopyHere, tar.exe, or an
+external extraction process. XML parsing uses MSXML 6 on a dedicated STA
+worker thread. COM interfaces are managed with ATL smart pointers.
+
+Build requirements:
+- Visual Studio 2022 / MSVC v143 and the MFC/ATL components.
+- MSXML 6 (included with supported Windows versions).
+- vcpkg with MSBuild integration enabled (run `vcpkg integrate install` once
+  for the selected vcpkg installation, if it has not already been enabled).
+- The included vcpkg.json manifest restores pinned zlib 1.3.1 automatically.
+  The project selects static-library triplets and matches the CRT linkage to
+  the MFC configuration (static CRT for Static MFC configurations, dynamic
+  CRT for Dynamic MFC configurations). The MSBuild link step resolves the
+  installed static library name and stages it under a stable local name.
+
+The ZIP reader supports stored and Deflate entries, verifies CRC-32, and
+rejects encrypted, multi-disk and ZIP64 packages, unsupported compression
+methods, symbolic links/reparse points, duplicate paths, path traversal,
+malformed headers, unsafe Windows file names, archives over 256 MiB, and
+expanded packages over 512 MiB. It extracts only into a newly created private
+temporary directory and removes that directory after conversion.
+
+zlib is linked statically; no zlib DLL or external extraction executable is
+required. This source update has not been compiled in this environment. Build
+the project in Visual Studio 2022 and test with representative DOCX files,
+including documents with images and tables.
