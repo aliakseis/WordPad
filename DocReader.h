@@ -8,12 +8,16 @@ namespace docreader
 {
     struct Options
     {
-        // Used for compressed (8-bit) text pieces. CP_ACP is the default.
-        // Set to e.g. 1251 for a known Windows-1251 source document.
-        unsigned int codePage = 0; // 0 means CP_ACP
+        // Used for compressed (8-bit) text pieces. Zero selects the ANSI code
+        // page associated with the document's FIB language ID, falling back
+        // to CP_ACP if Windows has no mapping. Set e.g. 1251 to override.
+        unsigned int codePage = 0;
 
         // Reject streams larger than this limit.
         std::uint64_t maxStreamBytes = 256ull * 1024 * 1024;
+
+        // Maximum generated RTF size, including hexadecimal image expansion.
+        std::uint64_t maxRtfBytes = 512ull * 1024 * 1024;
 
         // Maximum declared size of a single PICF picture payload.
         std::uint64_t maxImageBytes = 64ull * 1024 * 1024;

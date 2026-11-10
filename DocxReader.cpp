@@ -6,6 +6,7 @@
 #include <msxml6.h>
 #include <algorithm>
 #include <cwctype>
+#include <cwchar>
 #include <iterator>
 #include <cstdint>
 #include <fstream>
@@ -152,11 +153,13 @@ namespace docxreader {
         }
 
         // Unzips raw bytes directly to memory using a standard key-value map layout.
-        bool ExtractZipPackageToMemory(const std::wstring& zipPath, MemoryArchive& virtualFiles, std::wstring& error)
+        bool ExtractZipPackageToMemory(const std::wstring& zipPath, MemoryArchive& virtualFiles,
+            std::uint64_t maxDocumentBytes, std::wstring& error)
         {
             std::vector<std::uint8_t> archive;
-            if (!ReadWholeFile(zipPath, archive, 256ull * 1024 * 1024) || archive.size() < 22) {
-                error = L"Unable to read the DOCX ZIP package or the file exceeds the 256 MiB limit.";
+            if (maxDocumentBytes < 22 ||
+                !ReadWholeFile(zipPath, archive, maxDocumentBytes) || archive.size() < 22) {
+                error = L"Unable to read the DOCX ZIP package or the file exceeds the configured document-size limit.";
                 return false;
             }
 
@@ -251,8 +254,8 @@ namespace docxreader {
                 }
                 if (!isDirectory) {
                     totalExpanded += uncompressedSize;
-                    if (totalExpanded > 512ull * 1024 * 1024) {
-                        error = L"The expanded DOCX package exceeds the 512 MiB limit.";
+                    if (totalExpanded > maxDocumentBytes) {
+                        error = L"The expanded DOCX package exceeds the configured document-size limit.";
                         return false;
                     }
                 }
@@ -439,16 +442,10 @@ namespace docxreader {
                 else {
                     int value = (short)c;
 
-                    wchar_t nextChar = (i + 1 < text.size()) ? text[i + 1] : L'\0';
-
-                    if (nextChar >= L'0' && nextChar <= L'9') {
-                        out += L"\\u" + std::to_wstring(value) + nextChar;
-
-                        ++i;
-                    }
-                    else {
-                        out += L"\\u" + std::to_wstring(value) + L"?";
-                    }
+                    // With \uc1, every \uN control word is followed by exactly
+                    // one fallback character. Never consume the next source character:
+                    // doing so corrupts text such as U+00E9 followed by "7".
+                    out += L"\\u" + std::to_wstring(value) + L"?";
                 }
             }
             return out;
@@ -508,11 +505,13 @@ namespace docxreader {
                 std::wstring path = it->second;
                 std::vector<std::uint8_t> bytes;
                 if (!ReadBinaryFromMemory(archive, path, options.maxImageBytes, bytes) || bytes.empty()) return false;
-                std::wstring lower = it->second;
-                std::transform(lower.begin(), lower.end(), lower.begin(), [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
-                if (lower.size() >= 4 && lower.substr(lower.size() - 4) == L".png") ext = L"\\pngblip";
-                else if ((lower.size() >= 4 && lower.substr(lower.size() - 4) == L".jpg") ||
-                    (lower.size() >= 5 && lower.substr(lower.size() - 5) == L".jpeg")) ext = L"\\jpegblip";
+                const bool isPng = bytes.size() >= 8 &&
+                    bytes[0] == 0x89 && bytes[1] == 'P' && bytes[2] == 'N' && bytes[3] == 'G' &&
+                    bytes[4] == 0x0D && bytes[5] == 0x0A && bytes[6] == 0x1A && bytes[7] == 0x0A;
+                const bool isJpeg = bytes.size() >= 3 &&
+                    bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF;
+                if (isPng) ext = L"\\pngblip";
+                else if (isJpeg) ext = L"\\jpegblip";
                 else return false;
                 rtf += L"{\\pict" + ext + L"\\picw" + std::to_wstring(std::max(1L, widthTwips / 15)) +
                     L"\\pich" + std::to_wstring(std::max(1L, heightTwips / 15)) +
@@ -601,7 +600,14 @@ namespace docxreader {
                 std::wstring rid = Attr(link, L"id"), target;
                 auto it = rels.find(rid);
                 if (it != rels.end()) target = it->second;
-                if (target.empty() || target.find(L":") == std::wstring::npos) {
+                const auto colon = target.find(L':');
+                std::wstring scheme = colon == std::wstring::npos ? L"" : target.substr(0, colon);
+                std::transform(scheme.begin(), scheme.end(), scheme.begin(),
+                    [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+                const bool safeScheme = scheme == L"http" || scheme == L"https" ||
+                    scheme == L"mailto" || scheme == L"ftp";
+                if (!safeScheme || target.find_first_of(L"\r\n") != std::wstring::npos ||
+                    target.find(L'\0') != std::wstring::npos) {
                     appendRuns();
                     return;
                 }
@@ -616,6 +622,23 @@ namespace docxreader {
                 rtf += L"}}";
                 ++result.hyperlinksRead;
             }
+            long CellWidthTwips(IXMLDOMNode* cell) const
+            {
+                for (const auto& child : Children(cell)) {
+                    if (NodeName(child.p) != L"tcPr") continue;
+                    for (const auto& property : Children(child.p)) {
+                        if (NodeName(property.p) != L"tcW" || Attr(property.p, L"type") == L"pct")
+                            continue;
+                        const std::wstring value = Attr(property.p, L"w");
+                        if (value.empty()) continue;
+                        wchar_t* end = nullptr;
+                        const long width = std::wcstol(value.c_str(), &end, 10);
+                        if (end && *end == L'\0' && width >= 100 && width <= 20000)
+                            return width;
+                    }
+                }
+                return 1800; // sensible fallback for documents without explicit cell widths
+            }
             void Table(IXMLDOMNode * table)
             {
                 auto rows = Children(table);
@@ -623,10 +646,10 @@ namespace docxreader {
                     if (NodeName(row.p) != L"tr") continue;
                     rtf += L"\\trowd\\trgaph108\\trleft0";
                     auto cells = Children(row.p);
-                    int x = 1800;
+                    long x = 0;
                     for (const auto& cell : cells) {
                         if (NodeName(cell.p) == L"tc") {
-                            x += 1800;
+                            x = (std::min)(1000000L, x + CellWidthTwips(cell.p));
                             rtf += L"\\cellx" + std::to_wstring(x);
                         }
                     }
@@ -673,8 +696,15 @@ static Result ConvertToRtfOnSta(const std::wstring& fileName,
 {
     Result result;
     MemoryArchive archive;
-    // Unpack ZIP directly to the memory map object instead of hard disk directories
-    if (!ExtractZipPackageToMemory(fileName, archive, result.error)) return result;
+    if (options.maxDocumentBytes < 22 || options.maxImageBytes == 0) {
+        result.error = L"The DOCX import size limits are invalid.";
+        return result;
+    }
+
+    // Keep both the compressed package and total expanded payload within the
+    // caller's configured budget. No temporary extraction directory is used.
+    if (!ExtractZipPackageToMemory(fileName, archive, options.maxDocumentBytes, result.error))
+        return result;
     const std::wstring documentPath = L"word\\document.xml";
     const std::wstring relsPath = L"word\\_rels\\document.xml.rels";
     // Read and parse directly out of memory
@@ -687,8 +717,10 @@ static Result ConvertToRtfOnSta(const std::wstring& fileName,
     std::map<std::wstring, std::wstring> rels;
     std::wstring foldedRelsPath = relsPath;
     std::transform(foldedRelsPath.begin(), foldedRelsPath.end(), foldedRelsPath.begin(), [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
-    if (archive.find(foldedRelsPath) != archive.end()) {
-        LoadRelationshipsFromMemory(archive, relsPath, rels);
+    if (archive.find(foldedRelsPath) != archive.end() &&
+        !LoadRelationshipsFromMemory(archive, relsPath, rels)) {
+        result.error = L"Unable to parse the DOCX document relationships.";
+        return result;
     }
     CComPtr<IXMLDOMDocument2> doc;
     if (!LoadXmlFromMemory(archive, documentPath, doc)) { result.error = L"Unable to parse the DOCX document XML."; return result; }
@@ -703,6 +735,14 @@ static Result ConvertToRtfOnSta(const std::wstring& fileName,
                 const auto name = NodeName(block.p);
                 if (name == L"p") context.Paragraph(block.p);
                 else if (name == L"tbl") context.Table(block.p);
+                const std::uint64_t maxRtfChars = options.maxDocumentBytes >
+                    (std::numeric_limits<std::uint64_t>::max)() / 2
+                    ? (std::numeric_limits<std::uint64_t>::max)()
+                    : options.maxDocumentBytes * 2;
+                if (context.rtf.size() > maxRtfChars) {
+                    result.error = L"The converted DOCX RTF exceeds the configured output-size limit.";
+                    return result;
+                }
             }
         }
     }

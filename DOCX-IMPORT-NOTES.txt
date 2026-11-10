@@ -20,11 +20,22 @@ Build requirements:
 The ZIP reader supports stored and Deflate entries, verifies CRC-32, and
 rejects encrypted, multi-disk and ZIP64 packages, unsupported compression
 methods, symbolic links/reparse points, duplicate paths, path traversal,
-malformed headers, unsafe Windows file names, archives over 256 MiB, and
-expanded packages over 512 MiB. It extracts only into a newly created private
-temporary directory and removes that directory after conversion.
+malformed headers, and unsafe Windows file names. The default 128 MiB
+maxDocumentBytes option limits both the compressed package and aggregate
+expanded file payload. maxImageBytes limits each embedded image, and generated
+RTF is additionally bounded to approximately twice the package budget.
+Package entries remain in memory; no extraction directory is created.
+
+The Unicode-to-RTF conversion emits one fallback character for each RTF \u
+control and never consumes the following source character. Embedded image
+bytes are validated by PNG/JPEG signatures rather than trusting file names.
+External hyperlinks are limited to HTTP, HTTPS, FTP, and mailto schemes;
+DOCX table cell widths are retained when explicit twip widths are present.
+Malformed relationship XML is reported instead of silently discarding every
+image and hyperlink in the document.
 
 zlib is linked statically; no zlib DLL or external extraction executable is
-required. This source update has not been compiled in this environment. Build
+required. The source update has not been compiled in this environment. Build
 the project in Visual Studio 2022 and test with representative DOCX files,
-including documents with images and tables.
+including non-ASCII characters followed by digits, images, tables, hyperlinks,
+malformed ZIP/XML inputs, and packages near the configured limits.

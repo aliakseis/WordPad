@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cwchar>
 #include <array>
 #include <fstream>
 #include <limits>
@@ -43,6 +44,12 @@ namespace
     {
         IStream* p = nullptr;
         ~Stream() { if (p) p->Release(); }
+    };
+
+    struct ComUninitializeGuard
+    {
+        bool active = false;
+        ~ComUninitializeGuard() { if (active) CoUninitialize(); }
     };
 
     bool ReadAt(IStream* stream, std::uint64_t offset, void* dst, std::size_t bytes)
@@ -104,6 +111,7 @@ namespace
     {
         bool table1 = false;
         bool encrypted = false;
+        std::uint16_t languageId = 0;
         std::uint32_t fcMin = 0;
         std::uint32_t fcMac = 0;
         std::uint32_t fcClx = 0;
@@ -133,6 +141,7 @@ namespace
             return false;
         }
 
+        fib.languageId = U16(word, 6);
         const std::uint16_t flags = U16(word, 10);
         fib.encrypted = (flags & 0x0100) != 0 || (flags & 0x8000) != 0;
         fib.table1 = (flags & 0x0200) != 0;
@@ -192,6 +201,26 @@ namespace
             return false;
         }
         return true;
+    }
+
+    UINT CodePageFromLanguageId(std::uint16_t languageId)
+    {
+        if (languageId == 0)
+            return CP_ACP;
+
+        wchar_t codePageText[16]{};
+        const LCID locale = MAKELCID(static_cast<LANGID>(languageId), SORT_DEFAULT);
+        const int count = GetLocaleInfoW(locale, LOCALE_IDEFAULTANSICODEPAGE,
+            codePageText, static_cast<int>(_countof(codePageText)));
+        if (count <= 1)
+            return CP_ACP;
+
+        wchar_t* end = nullptr;
+        const unsigned long parsed = std::wcstoul(codePageText, &end, 10);
+        if (!end || *end != L'\0' || parsed == 0 || parsed > 65535 ||
+            !IsValidCodePage(static_cast<UINT>(parsed)))
+            return CP_ACP;
+        return static_cast<UINT>(parsed);
     }
 
     bool DecodeCompressed(const std::uint8_t* src, std::size_t count,
@@ -637,13 +666,15 @@ Result ConvertToRtf(const std::wstring& fileName,
         result.error = L"CoInitializeEx failed.";
         return result;
     }
+    ComUninitializeGuard apartment{ uninitialize };
 
+    try
+    {
     Storage storage;
     HRESULT hr = StgOpenStorage(fileName.c_str(), nullptr,
         STGM_READ | STGM_SHARE_DENY_WRITE, nullptr, 0, &storage.p);
     if (FAILED(hr))
     {
-        if (uninitialize) CoUninitialize();
         result.error = L"Cannot open the DOC compound file (StgOpenStorage failed).";
         return result;
     }
@@ -658,7 +689,6 @@ Result ConvertToRtf(const std::wstring& fileName,
     Stream wordStream, tableStream;
     if (FAILED(openStream(L"WordDocument", &wordStream.p)))
     {
-        if (uninitialize) CoUninitialize();
         result.error = L"The OLE file does not contain a WordDocument stream.";
         return result;
     }
@@ -666,7 +696,6 @@ Result ConvertToRtf(const std::wstring& fileName,
     std::uint64_t wordSize = 0;
     if (!GetStreamSize(wordStream.p, wordSize) || wordSize > options.maxStreamBytes)
     {
-        if (uninitialize) CoUninitialize();
         result.error = L"WordDocument stream is invalid or exceeds the configured size limit.";
         return result;
     }
@@ -674,7 +703,6 @@ Result ConvertToRtf(const std::wstring& fileName,
     std::vector<std::uint8_t> word;
     if (!ReadVector(wordStream.p, 0, wordSize, options.maxStreamBytes, word))
     {
-        if (uninitialize) CoUninitialize();
         result.error = L"Failed to read WordDocument stream.";
         return result;
     }
@@ -682,22 +710,20 @@ Result ConvertToRtf(const std::wstring& fileName,
     FibInfo fib;
     if (!ParseFib(word, fib, result.error))
     {
-        if (uninitialize) CoUninitialize();
         return result;
     }
 
     const wchar_t* tableName = fib.table1 ? L"1Table" : L"0Table";
     if (FAILED(openStream(tableName, &tableStream.p)))
     {
-        if (uninitialize) CoUninitialize();
         result.error = L"Cannot open the table stream selected by the FIB.";
         return result;
     }
 
     std::uint64_t tableSize = 0;
-    if (!GetStreamSize(tableStream.p, tableSize) || tableSize > options.maxStreamBytes)
+    if (!GetStreamSize(tableStream.p, tableSize) || tableSize > options.maxStreamBytes ||
+        tableSize > options.maxStreamBytes - wordSize)
     {
-        if (uninitialize) CoUninitialize();
         result.error = L"Table stream is invalid or exceeds the configured size limit.";
         return result;
     }
@@ -705,28 +731,44 @@ Result ConvertToRtf(const std::wstring& fileName,
     std::vector<std::uint8_t> table;
     if (!ReadVector(tableStream.p, 0, tableSize, options.maxStreamBytes, table))
     {
-        if (uninitialize) CoUninitialize();
         result.error = L"Failed to read table stream.";
         return result;
     }
 
     Stream dataStream;
     std::vector<std::uint8_t> data;
+    bool dataStreamSkipped = false;
     if (SUCCEEDED(openStream(L"Data", &dataStream.p)))
     {
         std::uint64_t dataSize = 0;
-        if (GetStreamSize(dataStream.p, dataSize) && dataSize <= options.maxStreamBytes)
-            ReadVector(dataStream.p, 0, dataSize, options.maxStreamBytes, data);
+        if (GetStreamSize(dataStream.p, dataSize))
+        {
+            const std::uint64_t remainingBudget = options.maxStreamBytes - wordSize - tableSize;
+            if (dataSize <= remainingBudget &&
+                !ReadVector(dataStream.p, 0, dataSize, remainingBudget, data))
+            {
+                result.warnings.push_back(L"The optional Data stream could not be read; embedded pictures may be unavailable.");
+            }
+            else if (dataSize > remainingBudget)
+            {
+                dataStreamSkipped = true;
+            }
+        }
     }
+    if (dataStreamSkipped)
+        result.warnings.push_back(L"The optional Data stream exceeds the remaining document-size budget; embedded pictures were skipped.");
 
     std::vector<Piece> pieces;
     if (!ParsePieceTable(table, fib.fcClx, fib.lcbClx, pieces, result.error))
     {
-        if (uninitialize) CoUninitialize();
         return result;
     }
 
-    const UINT codePage = options.codePage ? options.codePage : CP_ACP;
+    // FIB.lid is the document's default language. It is a much better
+    // fallback for compressed 8-bit pieces than the machine's current ACP.
+    // Callers can still override it when they know the source code page.
+    const UINT codePage = options.codePage ? options.codePage :
+        CodePageFromLanguageId(fib.languageId);
     std::wstring text;
     for (const Piece& piece : pieces)
     {
@@ -735,8 +777,7 @@ Result ConvertToRtf(const std::wstring& fileName,
         if (std::uint64_t(piece.fc) + byteLength > word.size())
         {
             result.error = L"A text piece points outside the WordDocument stream.";
-            if (uninitialize) CoUninitialize();
-            return result;
+                return result;
         }
 
         const auto* src = word.data() + piece.fc;
@@ -747,8 +788,7 @@ Result ConvertToRtf(const std::wstring& fileName,
         if (!ok)
         {
             result.error = L"Failed to decode a text piece.";
-            if (uninitialize) CoUninitialize();
-            return result;
+                return result;
         }
     }
 
@@ -777,12 +817,40 @@ Result ConvertToRtf(const std::wstring& fileName,
         }
     }
 
+    // Estimate the worst-case RTF expansion before constructing it. Unicode
+    // characters become \uN controls and images become two hex characters per
+    // source byte; reject oversized output before allocating the large string.
+    std::uint64_t estimatedRtfBytes = 1024;
+    if (text.size() > options.maxRtfBytes / 12)
+    {
+        result.error = L"The generated DOC RTF would exceed the configured output-size limit.";
+        return result;
+    }
+    estimatedRtfBytes += static_cast<std::uint64_t>(text.size()) * 12;
+    for (const auto& item : pictures)
+    {
+        const std::uint64_t imageBytes = item.second.bytes.size();
+        const std::uint64_t remaining = options.maxRtfBytes -
+            (std::min)(estimatedRtfBytes, options.maxRtfBytes);
+        // Hex payload plus the RTF picture group's control words and metadata.
+        if (imageBytes > (remaining > 512 ? (remaining - 512) / 2 : 0))
+        {
+            result.error = L"The generated DOC RTF would exceed the configured output-size limit.";
+            return result;
+        }
+        estimatedRtfBytes += imageBytes * 2 + 512;
+    }
+    if (estimatedRtfBytes > options.maxRtfBytes)
+    {
+        result.error = L"The generated DOC RTF would exceed the configured output-size limit.";
+        return result;
+    }
+
     // Rich Edit accepts PNG/JPEG payloads directly in RTF pict groups.
     std::wstring rtfText = MakeRtf(text, pictures, options.emitObjectPlaceholders);
     if (!WideToUtf8Bytes(rtfText, rtf))
     {
         result.error = L"Failed to encode generated RTF.";
-        if (uninitialize) CoUninitialize();
         return result;
     }
 
@@ -794,9 +862,22 @@ Result ConvertToRtf(const std::wstring& fileName,
         result.warnings.push_back(L"Some inline pictures could not be decoded. This implementation currently embeds PNG and JPEG picture payloads; floating pictures and other OfficeArt formats are not handled.");
     result.warnings.push_back(L"Character/paragraph formatting, floating pictures, and complex OfficeArt objects are not implemented yet.");
 
-    if (uninitialize)
-        CoUninitialize();
     return result;
+    }
+    catch (const std::bad_alloc&)
+    {
+        rtf.clear();
+        result.success = false;
+        result.error = L"Not enough memory to import this Word document.";
+        return result;
+    }
+    catch (...)
+    {
+        rtf.clear();
+        result.success = false;
+        result.error = L"An unexpected error occurred while importing this Word document.";
+        return result;
+    }
 }
 
 Result ConvertToRtfFile(const std::wstring& inputFile,
