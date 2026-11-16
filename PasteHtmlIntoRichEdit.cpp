@@ -1368,13 +1368,20 @@ namespace
     void AppendHyperlinkField(
         std::string& rtf,
         const std::wstring& url,
-        const std::string& contents)
+        const std::string& contents,
+        bool imagePayload = false)
     {
         rtf += "{\\field{\\*\\fldinst HYPERLINK \"";
         AppendRtfFieldInstruction(rtf, url);
-        rtf += "\"}{\\fldrslt {\\ul\\cf1 ";
+        rtf += "\"}{\\fldrslt ";
+        // Do not apply character underline/color controls to a pict group.
+        // Keeping the image as the field result avoids introducing a styled
+        // wrapper around the embedded object, which can disturb its position
+        // relative to the surrounding linked text in Rich Edit.
+        if (!imagePayload) rtf += "{\\ul\\cf1 ";
         rtf += contents;
-        rtf += "}}}";
+        if (!imagePayload) rtf += "}";
+        rtf += "}}";
     }
 
     std::string HtmlToRtf(
@@ -1519,7 +1526,7 @@ namespace
                 if (inserted)
                 {
                     if (!activeHyperlink.empty())
-                        AppendHyperlinkField(rtf, activeHyperlink, imageRtf);
+                        AppendHyperlinkField(rtf, activeHyperlink, imageRtf, true);
                     else
                         rtf += imageRtf;
                 }

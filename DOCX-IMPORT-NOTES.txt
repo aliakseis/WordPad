@@ -29,13 +29,30 @@ Package entries remain in memory; no extraction directory is created.
 The Unicode-to-RTF conversion emits one fallback character for each RTF \u
 control and never consumes the following source character. Embedded image
 bytes are validated by PNG/JPEG signatures rather than trusting file names.
-External hyperlinks are limited to HTTP, HTTPS, FTP, and mailto schemes;
-DOCX table cell widths are retained when explicit twip widths are present.
-Malformed relationship XML is reported instead of silently discarding every
-image and hyperlink in the document.
+External hyperlinks are limited to HTTP, HTTPS, FTP, and mailto schemes.
+DOCX paragraph and character styles are resolved through `basedOn` chains;
+`docDefaults` and the default paragraph style are applied where available.
+Supported run properties include emphasis, underline/strike, font size/family,
+foreground color, highlight, and superscript/subscript. Paragraph alignment,
+indents, spacing, keep and page-break properties are converted to RTF.
+
+Automatic numbering and bullets are emitted as stable textual labels. Decimal,
+decimal-zero, letter and Roman formats, multilevel labels, indentation, numbering
+instance start overrides, and level overrides are supported. Table conversion
+retains explicit cell widths or uses `tblGrid` widths, and supports horizontal
+and vertical merge controls, cell shading, borders, margins, vertical alignment,
+header rows and non-splitting rows. PNG/JPEG RTF dimensions now use intrinsic
+image dimensions plus DrawingML extents. Floating placement and crop transforms
+remain outside the current conversion scope.
+
+HTML clipboard hyperlinks are emitted as independent fields for text segments
+and linked images. Picture field results are no longer wrapped in text underline
+and color controls, reducing the chance of Rich Edit moving or restyling an
+embedded picture adjacent to linked text.
 
 zlib is linked statically; no zlib DLL or external extraction executable is
-required. The source update has not been compiled in this environment. Build
-the project in Visual Studio 2022 and test with representative DOCX files,
-including non-ASCII characters followed by digits, images, tables, hyperlinks,
-malformed ZIP/XML inputs, and packages near the configured limits.
+required. The new changes have received a C++17 syntax check, but have not been
+built with the Windows SDK/MSVC in this environment. Build the project in Visual
+Studio 2022 and run `IMPORT-TEST-PLAN.md` with representative DOC/DOCX files,
+including styles, numbering, merged tables, images, hyperlinks, malformed
+ZIP/XML inputs, and packages near the configured limits.

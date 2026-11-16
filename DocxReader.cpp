@@ -468,36 +468,534 @@ namespace docxreader {
             for (auto b : bytes) { out += digits[b >> 4]; out += digits[b & 15]; }
             return out;
         }
+        struct StyleDef {
+            std::wstring basedOn;
+            std::wstring paragraphRtf;
+            std::wstring runRtf;
+            long numId = -1;
+            long ilvl = 0;
+        };
+
+        struct NumberLevel {
+            std::wstring format;
+            std::wstring text;
+            long start = 1;
+            long left = 720;
+            long hanging = 360;
+        };
+
+        std::wstring HexColor(const std::wstring& value)
+        {
+            if (value.size() != 6) return {};
+            for (wchar_t c : value)
+                if (!iswxdigit(c)) return {};
+            std::wstring result = value;
+            std::transform(result.begin(), result.end(), result.begin(),
+                [](wchar_t c) { return static_cast<wchar_t>(std::towupper(c)); });
+            return result;
+        }
+
+        std::wstring NormalizeWordColor(const std::wstring& value)
+        {
+            const std::wstring hex = HexColor(value);
+            if (!hex.empty()) return hex;
+            static const std::map<std::wstring, std::wstring> named = {
+                {L"black",L"000000"},{L"blue",L"0000FF"},{L"cyan",L"00FFFF"},
+                {L"darkblue",L"000080"},{L"darkcyan",L"008080"},{L"darkgray",L"808080"},
+                {L"darkgreen",L"008000"},{L"darkmagenta",L"800080"},{L"darkred",L"800000"},
+                {L"darkyellow",L"808000"},{L"green",L"00FF00"},{L"lightgray",L"C0C0C0"},
+                {L"magenta",L"FF00FF"},{L"red",L"FF0000"},{L"white",L"FFFFFF"},
+                {L"yellow",L"FFFF00"}
+            };
+            std::wstring key = value;
+            std::transform(key.begin(), key.end(), key.begin(),
+                [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+            auto it = named.find(key);
+            return it == named.end() ? std::wstring() : it->second;
+        }
+
+        void CollectFonts(IXMLDOMNode* root, std::set<std::wstring>& fonts)
+        {
+            if (!root) return;
+            std::vector<CComPtr<IXMLDOMNode>> pending;
+            CComPtr<IXMLDOMNode> first = root;
+            pending.push_back(first);
+            while (!pending.empty()) {
+                CComPtr<IXMLDOMNode> node = pending.back();
+                pending.pop_back();
+                if (NodeName(node.p) == L"rFonts") {
+                    std::wstring name = Attr(node.p, L"ascii");
+                    if (name.empty()) name = Attr(node.p, L"hAnsi");
+                    if (name.empty()) name = Attr(node.p, L"eastAsia");
+                    if (!name.empty() && name.size() <= 128) fonts.insert(name);
+                }
+                for (auto& child : Children(node.p)) pending.push_back(child);
+            }
+        }
+
+        std::wstring RtfFontTable(const std::set<std::wstring>& fonts,
+            std::map<std::wstring, int>& indexes)
+        {
+            std::wstring table = L"{\\fonttbl{\\f0\\fnil Segoe UI;}";
+            int index = 1;
+            for (const auto& font : fonts) {
+                std::wstring safe;
+                for (wchar_t c : font)
+                    if (c >= 0x20 && c != L'{' && c != L'}' && c != L'\\' && c != L';') safe += c;
+                if (safe.empty()) continue;
+                table += L"{\\f" + std::to_wstring(index) + L"\\fnil " + safe + L";}";
+                indexes[font] = index++;
+            }
+            table += L"}";
+            return table;
+        }
+
+        void CollectColors(IXMLDOMNode* root, std::set<std::wstring>& colors)
+        {
+            if (!root) return;
+            std::vector<CComPtr<IXMLDOMNode>> pending;
+            CComPtr<IXMLDOMNode> first = root;
+            pending.push_back(first);
+            while (!pending.empty()) {
+                CComPtr<IXMLDOMNode> node = pending.back();
+                pending.pop_back();
+                const std::wstring name = NodeName(node.p);
+                if (name == L"color" || name == L"shd" || name == L"highlight" ||
+                    name == L"top" || name == L"bottom" || name == L"left" ||
+                    name == L"right" || name == L"insideH" || name == L"insideV" ||
+                    name == L"start" || name == L"end") {
+                    std::wstring color = NormalizeWordColor(Attr(node.p, L"val"));
+                    if (color.empty()) color = NormalizeWordColor(Attr(node.p, L"fill"));
+                    if (color.empty()) color = NormalizeWordColor(Attr(node.p, L"color"));
+                    if (!color.empty()) colors.insert(color);
+                }
+                auto children = Children(node.p);
+                for (auto& child : children) pending.push_back(child);
+            }
+        }
+
+        std::wstring RtfColorTable(const std::set<std::wstring>& colors,
+            std::map<std::wstring, int>& indexes)
+        {
+            std::wstring table = L"{\\colortbl;";
+            int index = 1;
+            for (const auto& color : colors) {
+                const int r = std::stoi(color.substr(0, 2), nullptr, 16);
+                const int g = std::stoi(color.substr(2, 2), nullptr, 16);
+                const int b = std::stoi(color.substr(4, 2), nullptr, 16);
+                table += L"\\red" + std::to_wstring(r) + L"\\green" +
+                    std::to_wstring(g) + L"\\blue" + std::to_wstring(b) + L";";
+                indexes[color] = index++;
+            }
+            table += L"}";
+            return table;
+        }
+
+        std::wstring ColorControl(const std::wstring& value,
+            const std::map<std::wstring, int>& colors, const wchar_t* control)
+        {
+            const std::wstring color = NormalizeWordColor(value);
+            auto it = colors.find(color);
+            return it == colors.end() ? std::wstring() :
+                std::wstring(L"\\") + control + std::to_wstring(it->second) + L" ";
+        }
+
+        std::wstring RunPropertiesRtf(IXMLDOMNode* properties,
+            const std::map<std::wstring, int>& colors,
+            const std::map<std::wstring, int>& fonts)
+        {
+            std::wstring out;
+            for (const auto& property : Children(properties)) {
+                const std::wstring name = NodeName(property.p);
+                const std::wstring value = Attr(property.p, L"val");
+                const bool enabled = value != L"0" && value != L"false" && value != L"off";
+                if (name == L"b") out += enabled ? L"\\b " : L"\\b0 ";
+                else if (name == L"i") out += enabled ? L"\\i " : L"\\i0 ";
+                else if (name == L"strike" || name == L"dstrike") out += enabled ? L"\\strike " : L"\\strike0 ";
+                else if (name == L"u") out += (value.empty() || (value != L"none" && value != L"0")) ? L"\\ul " : L"\\ul0 ";
+                else if (name == L"caps") out += enabled ? L"\\caps " : L"\\caps0 ";
+                else if (name == L"smallCaps") out += enabled ? L"\\scaps " : L"\\scaps0 ";
+                else if (name == L"vanish") out += enabled ? L"\\v " : L"\\v0 ";
+                else if (name == L"sz" || name == L"szCs") {
+                    wchar_t* end = nullptr;
+                    const long n = std::wcstol(value.c_str(), &end, 10);
+                    if (end && *end == L'\0' && n >= 4 && n <= 400) out += L"\\fs" + std::to_wstring(n) + L" ";
+                }
+                else if (name == L"vertAlign") {
+                    if (value == L"superscript") out += L"\\super ";
+                    else if (value == L"subscript") out += L"\\sub ";
+                    else out += L"\\nosupersub ";
+                }
+                else if (name == L"color") out += ColorControl(value, colors, L"cf");
+                else if (name == L"highlight") out += ColorControl(value, colors, L"highlight");
+                else if (name == L"rFonts") {
+                    std::wstring font = Attr(property.p, L"ascii");
+                    if (font.empty()) font = Attr(property.p, L"hAnsi");
+                    if (font.empty()) font = Attr(property.p, L"eastAsia");
+                    auto it = fonts.find(font);
+                    if (it != fonts.end()) out += L"\\f" + std::to_wstring(it->second) + L" ";
+                }
+            }
+            return out;
+        }
+
+        std::wstring ParagraphPropertiesRtf(IXMLDOMNode* properties)
+        {
+            std::wstring out;
+            for (const auto& property : Children(properties)) {
+                const std::wstring name = NodeName(property.p);
+                const std::wstring value = Attr(property.p, L"val");
+                if (name == L"jc") {
+                    if (value == L"center") out += L"\\qc ";
+                    else if (value == L"right" || value == L"end") out += L"\\qr ";
+                    else if (value == L"both" || value == L"distribute") out += L"\\qj ";
+                    else out += L"\\ql ";
+                }
+                else if (name == L"ind") {
+                    auto emit = [&](const wchar_t* attr, const wchar_t* control) {
+                        const std::wstring v = Attr(property.p, attr);
+                        if (!v.empty()) {
+                            wchar_t* end = nullptr; long n = std::wcstol(v.c_str(), &end, 10);
+                            if (end && *end == L'\0' && n >= -31680 && n <= 31680)
+                                out += std::wstring(L"\\") + control + std::to_wstring(n) + L" ";
+                        }
+                    };
+                    emit(L"left", L"li"); emit(L"right", L"ri");
+                    emit(L"firstLine", L"fi");
+                    const std::wstring hanging = Attr(property.p, L"hanging");
+                    if (!hanging.empty()) {
+                        wchar_t* end = nullptr; long n = std::wcstol(hanging.c_str(), &end, 10);
+                        if (end && *end == L'\0' && n >= 0 && n <= 31680) out += L"\\fi-" + std::to_wstring(n) + L" ";
+                    }
+                }
+                else if (name == L"spacing") {
+                    auto emit = [&](const wchar_t* attr, const wchar_t* control) {
+                        const std::wstring v = Attr(property.p, attr);
+                        if (!v.empty()) {
+                            wchar_t* end = nullptr; long n = std::wcstol(v.c_str(), &end, 10);
+                            if (end && *end == L'\0' && n >= 0 && n <= 31680)
+                                out += std::wstring(L"\\") + control + std::to_wstring(n) + L" ";
+                        }
+                    };
+                    emit(L"before", L"sb"); emit(L"after", L"sa");
+                    emit(L"line", L"sl");
+                }
+                else if (name == L"keepNext" && value != L"0") out += L"\\keepn ";
+                else if (name == L"keepLines" && value != L"0") out += L"\\keep ";
+                else if (name == L"pageBreakBefore" && value != L"0") out += L"\\pagebb ";
+            }
+            return out;
+        }
+
+        bool ParseLong(const std::wstring& value, long& number)
+        {
+            if (value.empty()) return false;
+            wchar_t* end = nullptr;
+            const long parsed = std::wcstol(value.c_str(), &end, 10);
+            if (!end || *end != L'\0') return false;
+            number = parsed;
+            return true;
+        }
+
+        NumberLevel ParseNumberLevel(IXMLDOMNode* level)
+        {
+            NumberLevel result;
+            for (const auto& child : Children(level)) {
+                const std::wstring name = NodeName(child.p);
+                if (name == L"numFmt") result.format = Attr(child.p, L"val");
+                else if (name == L"lvlText") result.text = Attr(child.p, L"val");
+                else if (name == L"start") { long n; if (ParseLong(Attr(child.p, L"val"), n)) result.start = (std::max)(1L, (std::min)(32767L, n)); }
+                else if (name == L"pPr") {
+                    for (const auto& p : Children(child.p)) if (NodeName(p.p) == L"ind") {
+                        long n; if (ParseLong(Attr(p.p, L"left"), n)) result.left = n;
+                        if (ParseLong(Attr(p.p, L"hanging"), n)) result.hanging = n;
+                    }
+                }
+            }
+            if (result.format.empty()) result.format = L"decimal";
+            return result;
+        }
+
+        std::wstring FormatNumber(long value, const std::wstring& format)
+        {
+            if (format == L"bullet") return L"\x2022";
+            if (format == L"decimalZero") {
+                std::wstring s = std::to_wstring(value);
+                return value < 10 ? L"0" + s : s;
+            }
+            if (format == L"lowerLetter" || format == L"upperLetter") {
+                std::wstring s;
+                long n = (std::max)(1L, value);
+                while (n > 0) { --n; s.insert(s.begin(), static_cast<wchar_t>((format == L"upperLetter" ? L'A' : L'a') + n % 26)); n /= 26; }
+                return s;
+            }
+            if (format == L"lowerRoman" || format == L"upperRoman") {
+                static const long values[] = {1000,900,500,400,100,90,50,40,10,9,5,4,1};
+                static const wchar_t* numerals[] = {L"m",L"cm",L"d",L"cd",L"c",L"xc",L"l",L"xl",L"x",L"ix",L"v",L"iv",L"i"};
+                if (value <= 0 || value > 3999) return std::to_wstring(value);
+                std::wstring out;
+                for (size_t i=0; i<13; ++i) while (value >= values[i]) { out += numerals[i]; value -= values[i]; }
+                if (format == L"upperRoman") std::transform(out.begin(), out.end(), out.begin(),
+                    [](wchar_t c) { return static_cast<wchar_t>(std::towupper(c)); });
+                return out;
+            }
+            return std::to_wstring(value);
+        }
+
+        struct ImageDimensions { long width = 0; long height = 0; };
+
+        ImageDimensions ReadImageDimensions(const std::vector<std::uint8_t>& bytes, bool png)
+        {
+            ImageDimensions d;
+            if (png && bytes.size() >= 24) {
+                d.width = static_cast<long>((static_cast<std::uint32_t>(bytes[16]) << 24) | (static_cast<std::uint32_t>(bytes[17]) << 16) | (static_cast<std::uint32_t>(bytes[18]) << 8) | bytes[19]);
+                d.height = static_cast<long>((static_cast<std::uint32_t>(bytes[20]) << 24) | (static_cast<std::uint32_t>(bytes[21]) << 16) | (static_cast<std::uint32_t>(bytes[22]) << 8) | bytes[23]);
+            }
+            else if (!png && bytes.size() > 4) {
+                size_t i = 2;
+                while (i + 4 < bytes.size()) {
+                    if (bytes[i] != 0xFF) { ++i; continue; }
+                    while (i < bytes.size() && bytes[i] == 0xFF) ++i;
+                    if (i >= bytes.size()) break;
+                    const std::uint8_t marker = bytes[i++];
+                    if (marker == 0xD8 || marker == 0xD9 || (marker >= 0xD0 && marker <= 0xD7)) continue;
+                    if (i + 2 > bytes.size()) break;
+                    const std::uint16_t length = static_cast<std::uint16_t>((bytes[i] << 8) | bytes[i+1]);
+                    if (length < 2 || i + length > bytes.size()) break;
+                    const bool sof = (marker >= 0xC0 && marker <= 0xC3) || (marker >= 0xC5 && marker <= 0xC7) || (marker >= 0xC9 && marker <= 0xCB) || (marker >= 0xCD && marker <= 0xCF);
+                    if (sof && length >= 7) { d.height = (bytes[i+3] << 8) | bytes[i+4]; d.width = (bytes[i+5] << 8) | bytes[i+6]; break; }
+                    i += length;
+                }
+            }
+            if (d.width <= 0 || d.height <= 0 || d.width > 100000 || d.height > 100000 || static_cast<std::uint64_t>(d.width) * d.height > 100000000ull) return {};
+            return d;
+        }
+
         struct ImportContext {
             const MemoryArchive& archive;
             std::map<std::wstring, std::wstring> rels;
             const Options& options;
             Result& result;
-            std::wstring rtf = L"{\\rtf1\\ansi\\deff0\\uc1\n";
+            std::map<std::wstring, int> colorIndexes;
+            std::map<std::wstring, int> fontIndexes;
+            std::map<std::wstring, StyleDef> styles;
+            std::wstring defaultParagraphRtf;
+            std::wstring defaultRunRtf;
+            std::wstring defaultParagraphStyle;
+            std::map<int, std::map<int, NumberLevel>> abstractNumbering;
+            std::map<int, int> numberToAbstract;
+            std::map<int, std::map<int, NumberLevel>> numLevelOverrides;
+            std::map<std::pair<int, int>, long> startOverrides;
+            std::map<int, std::vector<long>> numberCounters;
+            std::wstring paragraphRunStyle;
+            std::wstring rtf;
             ImportContext(const MemoryArchive& memArchive,
                 std::map<std::wstring, std::wstring>&& relationships,
-                const Options& importOptions, Result& importResult)
+                const Options& importOptions, Result& importResult,
+                const std::set<std::wstring>& colors, const std::set<std::wstring>& fonts)
                 : archive(memArchive), rels(std::move(relationships)),
                 options(importOptions), result(importResult) {
+                rtf = L"{\\rtf1\\ansi\\deff0\\uc1" + RtfFontTable(fonts, fontIndexes) + RtfColorTable(colors, colorIndexes) + L"\n";
+            }
+
+            void LoadStyles(IXMLDOMNode* root)
+            {
+                for (const auto& node : Children(root)) {
+                    if (NodeName(node.p) == L"docDefaults") {
+                        for (const auto& defaults : Children(node.p)) {
+                            if (NodeName(defaults.p) == L"pPrDefault") {
+                                for (const auto& p : Children(defaults.p))
+                                    if (NodeName(p.p) == L"pPr") defaultParagraphRtf = ParagraphPropertiesRtf(p.p);
+                            }
+                            else if (NodeName(defaults.p) == L"rPrDefault") {
+                                for (const auto& r : Children(defaults.p))
+                                    if (NodeName(r.p) == L"rPr") defaultRunRtf = RunPropertiesRtf(r.p, colorIndexes, fontIndexes);
+                            }
+                        }
+                        continue;
+                    }
+                    if (NodeName(node.p) != L"style") continue;
+                    const std::wstring id = Attr(node.p, L"styleId");
+                    if (id.empty()) continue;
+                    StyleDef def;
+                    if (Attr(node.p, L"default") == L"1" && Attr(node.p, L"type") == L"paragraph") defaultParagraphStyle = id;
+                    for (const auto& property : Children(node.p)) {
+                        const std::wstring name = NodeName(property.p);
+                        if (name == L"basedOn") def.basedOn = Attr(property.p, L"val");
+                        else if (name == L"pPr") {
+                            def.paragraphRtf = ParagraphPropertiesRtf(property.p);
+                            for (const auto& pProperty : Children(property.p)) {
+                                if (NodeName(pProperty.p) == L"rPr") def.runRtf += RunPropertiesRtf(pProperty.p, colorIndexes, fontIndexes);
+                                else if (NodeName(pProperty.p) == L"numPr") {
+                                    for (const auto& n : Children(pProperty.p)) {
+                                        if (NodeName(n.p) == L"numId") ParseLong(Attr(n.p, L"val"), def.numId);
+                                        else if (NodeName(n.p) == L"ilvl") ParseLong(Attr(n.p, L"val"), def.ilvl);
+                                    }
+                                }
+                            }
+                        }
+                        else if (name == L"rPr") def.runRtf += RunPropertiesRtf(property.p, colorIndexes, fontIndexes);
+                    }
+                    styles[id] = std::move(def);
+                }
+            }
+
+            void LoadNumbering(IXMLDOMNode* root)
+            {
+                for (const auto& node : Children(root)) {
+                    const std::wstring name = NodeName(node.p);
+                    if (name == L"abstractNum") {
+                        long idValue;
+                        if (!ParseLong(Attr(node.p, L"abstractNumId"), idValue) || idValue < 0 || idValue > 1000000) continue;
+                        const int abstractId = static_cast<int>(idValue);
+                        for (const auto& level : Children(node.p)) {
+                            if (NodeName(level.p) != L"lvl") continue;
+                            long ilvl = 0;
+                            if (!ParseLong(Attr(level.p, L"ilvl"), ilvl) || ilvl < 0 || ilvl > 8) continue;
+                            abstractNumbering[abstractId][static_cast<int>(ilvl)] = ParseNumberLevel(level.p);
+                        }
+                    }
+                    else if (name == L"num") {
+                        long numId = -1;
+                        if (!ParseLong(Attr(node.p, L"numId"), numId) || numId < 0 || numId > 1000000) continue;
+                        for (const auto& child : Children(node.p)) {
+                            if (NodeName(child.p) == L"abstractNumId") {
+                                long abstractId;
+                                if (ParseLong(Attr(child.p, L"val"), abstractId)) numberToAbstract[static_cast<int>(numId)] = static_cast<int>(abstractId);
+                            }
+                            else if (NodeName(child.p) == L"lvlOverride") {
+                                long ilvl = 0;
+                                if (!ParseLong(Attr(child.p, L"ilvl"), ilvl) || ilvl < 0 || ilvl > 8) continue;
+                                for (const auto& over : Children(child.p)) {
+                                    if (NodeName(over.p) == L"startOverride") {
+                                        long start;
+                                        if (ParseLong(Attr(over.p, L"val"), start)) startOverrides[{static_cast<int>(numId), static_cast<int>(ilvl)}] = (std::max)(1L, start);
+                                    }
+                                    else if (NodeName(over.p) == L"lvl") numLevelOverrides[static_cast<int>(numId)][static_cast<int>(ilvl)] = ParseNumberLevel(over.p);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            std::pair<std::wstring, std::wstring> ResolveStyle(const std::wstring& id,
+                std::set<std::wstring>& visiting, int depth = 0) const
+            {
+                if (id.empty() || depth > 32 || !visiting.insert(id).second) return {};
+                auto it = styles.find(id);
+                if (it == styles.end()) { visiting.erase(id); return {}; }
+                std::pair<std::wstring, std::wstring> resultPair;
+                if (!it->second.basedOn.empty()) resultPair = ResolveStyle(it->second.basedOn, visiting, depth + 1);
+                resultPair.first += it->second.paragraphRtf;
+                resultPair.second += it->second.runRtf;
+                visiting.erase(id);
+                return resultPair;
+            }
+
+            std::pair<std::wstring, std::wstring> StyleRtf(const std::wstring& id) const
+            {
+                std::set<std::wstring> visiting;
+                return ResolveStyle(id, visiting);
+            }
+
+            std::wstring NumberPrefix(IXMLDOMNode* paragraph, const std::wstring& paragraphStyle)
+            {
+                CComPtr<IXMLDOMNode> pPr;
+                for (const auto& child : Children(paragraph)) if (NodeName(child.p) == L"pPr") { pPr = child.p; break; }
+                long numId = -1, ilvl = 0;
+                if (pPr) {
+                    for (const auto& child : Children(pPr.p)) if (NodeName(child.p) == L"numPr") {
+                        for (const auto& item : Children(child.p)) {
+                            if (NodeName(item.p) == L"numId") ParseLong(Attr(item.p, L"val"), numId);
+                            else if (NodeName(item.p) == L"ilvl") ParseLong(Attr(item.p, L"val"), ilvl);
+                        }
+                    }
+                }
+                if (numId < 0) {
+                    std::wstring current = paragraphStyle;
+                    std::set<std::wstring> visited;
+                    for (int depth = 0; !current.empty() && depth < 32 && visited.insert(current).second; ++depth) {
+                        auto styleIt = styles.find(current);
+                        if (styleIt == styles.end()) break;
+                        if (styleIt->second.numId >= 0) { numId = styleIt->second.numId; ilvl = styleIt->second.ilvl; break; }
+                        current = styleIt->second.basedOn;
+                    }
+                }
+                if (numId <= 0 || ilvl < 0 || ilvl > 8) return {};
+                auto num = numberToAbstract.find(static_cast<int>(numId));
+                if (num == numberToAbstract.end()) return {};
+                auto abstract = abstractNumbering.find(num->second);
+                if (abstract == abstractNumbering.end()) return {};
+                const NumberLevel* currentLevel = nullptr;
+                auto numberOverride = numLevelOverrides.find(static_cast<int>(numId));
+                if (numberOverride != numLevelOverrides.end()) {
+                    auto overrideLevel = numberOverride->second.find(static_cast<int>(ilvl));
+                    if (overrideLevel != numberOverride->second.end()) currentLevel = &overrideLevel->second;
+                }
+                if (!currentLevel) {
+                    auto level = abstract->second.find(static_cast<int>(ilvl));
+                    if (level == abstract->second.end()) return {};
+                    currentLevel = &level->second;
+                }
+
+                auto& counters = numberCounters[static_cast<int>(numId)];
+                if (counters.size() < 9) counters.resize(9, 0);
+                long start = currentLevel->start;
+                auto overrideIt = startOverrides.find({ static_cast<int>(numId), static_cast<int>(ilvl) });
+                if (overrideIt != startOverrides.end()) start = overrideIt->second;
+                if (counters[ilvl] == 0) counters[ilvl] = start;
+                else ++counters[ilvl];
+                for (int lower = static_cast<int>(ilvl) + 1; lower < 9; ++lower) counters[lower] = 0;
+
+                std::wstring label = currentLevel->format == L"bullet" ? L"\x2022" : currentLevel->text;
+                for (int n = 0; n < 9; ++n) {
+                    const std::wstring token = L"%" + std::to_wstring(n + 1);
+                    size_t pos = 0;
+                    while ((pos = label.find(token, pos)) != std::wstring::npos) {
+                        const NumberLevel* formatLevel = nullptr;
+                        if (numberOverride != numLevelOverrides.end()) {
+                            auto ov = numberOverride->second.find(n);
+                            if (ov != numberOverride->second.end()) formatLevel = &ov->second;
+                        }
+                        if (!formatLevel) {
+                            auto base = abstract->second.find(n);
+                            if (base != abstract->second.end()) formatLevel = &base->second;
+                        }
+                        const std::wstring fmt = formatLevel ? formatLevel->format : L"decimal";
+                        long count = counters[n];
+                        if (count == 0) count = formatLevel ? formatLevel->start : 1;
+                        const std::wstring replacement = FormatNumber(count, fmt);
+                        label.replace(pos, token.size(), replacement);
+                        pos += replacement.size();
+                    }
+                }
+                if (label.empty()) label = FormatNumber(counters[ilvl], currentLevel->format) + L".";
+                const long left = (std::max)(0L, (std::min)(31680L, currentLevel->left));
+                const long hanging = (std::max)(0L, (std::min)(31680L, currentLevel->hanging));
+                return L"\\li" + std::to_wstring(left) + L"\\fi-" + std::to_wstring(hanging) + L" " + RtfText(label) + L"\\tab ";
             }
             bool Image(IXMLDOMNode* drawing)
             {
                 if (!options.importImages) return false;
                 std::wstring rid, ext;
-                long widthTwips = 3000, heightTwips = 2000;
+                long widthTwips = 0, heightTwips = 0;
+                bool widthFound = false, heightFound = false;
                 auto stack = Children(drawing);
                 while (!stack.empty()) {
                     auto node = stack.back();
                     stack.pop_back();
                     const auto nodeName = NodeName(node.p);
                     if (nodeName == L"blip") rid = Attr(node.p, L"embed");
-                    else if (nodeName == L"extent") {
+                    else if (nodeName == L"extent" && (!widthFound || !heightFound)) {
                         const auto cx = Attr(node.p, L"cx"), cy = Attr(node.p, L"cy");
-                        if (!cx.empty()) widthTwips = std::max(1L, std::min(20000L, _wtol(cx.c_str()) / 635));
-                        if (!cy.empty()) heightTwips = std::max(1L, std::min(20000L, _wtol(cy.c_str()) / 635));
+                        if (!widthFound && !cx.empty()) { widthTwips = (std::max)(1L, (std::min)(20000L, _wtol(cx.c_str()) / 635)); widthFound = true; }
+                        if (!heightFound && !cy.empty()) { heightTwips = (std::max)(1L, (std::min)(20000L, _wtol(cy.c_str()) / 635)); heightFound = true; }
                     }
                     auto children = Children(node.p);
-                    for (const auto& child : children) stack.push_back(child);
+                    // Push in reverse so the depth-first walk follows XML order;
+                    // wp:extent is encountered before the nested a:xfrm extent.
+                    for (auto it = children.rbegin(); it != children.rend(); ++it) stack.push_back(*it);
                 }
                 if (rid.empty()) return false;
                 auto it = rels.find(rid);
@@ -513,8 +1011,23 @@ namespace docxreader {
                 if (isPng) ext = L"\\pngblip";
                 else if (isJpeg) ext = L"\\jpegblip";
                 else return false;
-                rtf += L"{\\pict" + ext + L"\\picw" + std::to_wstring(std::max(1L, widthTwips / 15)) +
-                    L"\\pich" + std::to_wstring(std::max(1L, heightTwips / 15)) +
+                const ImageDimensions intrinsic = ReadImageDimensions(bytes, isPng);
+                const long pixelWidth = intrinsic.width > 0 ? intrinsic.width : (std::max)(1L, widthTwips / 15);
+                const long pixelHeight = intrinsic.height > 0 ? intrinsic.height : (std::max)(1L, heightTwips / 15);
+                if (!widthFound && intrinsic.width > 0) {
+                    widthTwips = heightFound && pixelHeight > 0
+                        ? static_cast<long>((static_cast<std::uint64_t>(heightTwips) * pixelWidth) / pixelHeight)
+                        : (std::min)(20000L, pixelWidth * 15L);
+                }
+                if (!heightFound && intrinsic.height > 0) {
+                    heightTwips = widthFound && pixelWidth > 0
+                        ? static_cast<long>((static_cast<std::uint64_t>(widthTwips) * pixelHeight) / pixelWidth)
+                        : (std::min)(20000L, pixelHeight * 15L);
+                }
+                if (widthTwips <= 0) widthTwips = 3000;
+                if (heightTwips <= 0) heightTwips = 2000;
+                rtf += L"{\\pict" + ext + L"\\picw" + std::to_wstring(pixelWidth) +
+                    L"\\pich" + std::to_wstring(pixelHeight) +
                     L"\\picwgoal" + std::to_wstring(widthTwips) +
                     L"\\pichgoal" + std::to_wstring(heightTwips) + L"\n" + Hex(bytes) + L"}";
                 ++result.imagesRead;
@@ -522,68 +1035,70 @@ namespace docxreader {
             }
             void Run(IXMLDOMNode* run)
             {
-                rtf += L"{";
+                rtf += L"{" + paragraphRunStyle;
                 CComPtr<IXMLDOMNode> properties;
                 auto children = Children(run);
                 for (const auto& child : children) {
-                    if (NodeName(child.p) == L"rPr") {
-                        properties = child.p;
-                        break;
-                    }
+                    if (NodeName(child.p) == L"rPr") { properties = child.p; break; }
                 }
                 if (properties) {
-                    auto propertyNodes = Children(properties.p);
-                    for (const auto& property : propertyNodes) {
-                        const auto name = NodeName(property.p);
-                        if (name == L"b" && Attr(property.p, L"val") != L"0" && Attr(property.p, L"val") != L"false") rtf += L"\\b";
-                        else if (name == L"i" && Attr(property.p, L"val") != L"0" && Attr(property.p, L"val") != L"false") rtf += L"\\i";
-                        else if ((name == L"strike" || name == L"dstrike") && Attr(property.p, L"val") != L"0") rtf += L"\\strike";
-                        else if (name == L"u" && Attr(property.p, L"val") != L"none" && Attr(property.p, L"val") != L"0") rtf += L"\\ul";
-                        else if (name == L"sz") {
-                            auto value = Attr(property.p, L"val");
-                            if (!value.empty()) {
-                                rtf += L"\\fs" + value + L" ";
-                            }
+                    for (const auto& property : Children(properties.p)) {
+                        if (NodeName(property.p) == L"rStyle") {
+                            const auto style = StyleRtf(Attr(property.p, L"val"));
+                            rtf += style.second;
                         }
                     }
+                    rtf += RunPropertiesRtf(properties.p, colorIndexes, fontIndexes);
                 }
                 for (const auto& child : children) {
                     const auto name = NodeName(child.p);
-                    if (name == L"t") rtf += RtfText(NodeText(child.p));
+                    if (name == L"t" || name == L"delText" || name == L"instrText") rtf += RtfText(NodeText(child.p));
                     else if (name == L"tab") rtf += L"\\tab ";
-                    else if (name == L"br") rtf += (Attr(child.p, L"type") == L"page" ? L"\\page " : L"\\line ");
+                    else if (name == L"br" || name == L"cr") rtf += (Attr(child.p, L"type") == L"page" ? L"\\page " : L"\\line ");
                     else if (name == L"drawing" || name == L"pict") Image(child.p);
                 }
-                rtf += L"\\plain}";
+                // Run formatting is scoped by the RTF group; do not issue \\plain,
+                // which would reset inherited formatting inside this run.
+                rtf += L"}";
             }
             void Paragraph(IXMLDOMNode* paragraph, bool inTable = false)
             {
                 rtf += inTable ? L"\\pard\\intbl" : L"\\pard";
                 auto children = Children(paragraph);
                 CComPtr<IXMLDOMNode> paragraphProperties;
-                for (const auto& child : children) {
-                    if (NodeName(child.p) == L"pPr") {
-                        paragraphProperties = child.p;
-                        break;
-                    }
-                }
+                std::wstring styleId;
+                for (const auto& child : children) if (NodeName(child.p) == L"pPr") { paragraphProperties = child.p; break; }
                 if (paragraphProperties) {
-                    auto properties = Children(paragraphProperties.p);
-                    for (const auto& property : properties) {
-                        if (NodeName(property.p) == L"jc") {
-                            const auto value = Attr(property.p, L"val");
-                            if (value == L"center") rtf += L"\\qc";
-                            else if (value == L"right" || value == L"end") rtf += L"\\qr";
-                            else if (value == L"both" || value == L"distribute") rtf += L"\\qj";
-                            else rtf += L"\\ql";
-                        }
+                    for (const auto& property : Children(paragraphProperties.p)) {
+                        if (NodeName(property.p) == L"pStyle") styleId = Attr(property.p, L"val");
                     }
                 }
+                if (styleId.empty()) styleId = defaultParagraphStyle;
+                const auto style = StyleRtf(styleId);
+                rtf += defaultParagraphRtf + style.first;
+                if (paragraphProperties) rtf += ParagraphPropertiesRtf(paragraphProperties.p);
+                const std::wstring oldParagraphRunStyle = paragraphRunStyle;
+                paragraphRunStyle = defaultRunRtf + style.second;
+                if (paragraphProperties) {
+                    for (const auto& property : Children(paragraphProperties.p))
+                        if (NodeName(property.p) == L"rPr") paragraphRunStyle += RunPropertiesRtf(property.p, colorIndexes, fontIndexes);
+                }
+                rtf += NumberPrefix(paragraph, styleId);
                 for (const auto& child : children) {
                     const auto name = NodeName(child.p);
                     if (name == L"r") Run(child.p);
                     else if (name == L"hyperlink") Hyperlink(child.p);
+                    else if (name == L"sdt") {
+                        for (const auto& sdtChild : Children(child.p)) {
+                            if (NodeName(sdtChild.p) == L"sdtContent")
+                                for (const auto& content : Children(sdtChild.p)) {
+                                    if (NodeName(content.p) == L"r") Run(content.p);
+                                    else if (NodeName(content.p) == L"hyperlink") Hyperlink(content.p);
+                                }
+                        }
+                    }
                 }
+                paragraphRunStyle = oldParagraphRunStyle;
                 rtf += L"\\par\n";
             }
             void Hyperlink(IXMLDOMNode* link)
@@ -637,35 +1152,175 @@ namespace docxreader {
                             return width;
                     }
                 }
-                return 1800; // sensible fallback for documents without explicit cell widths
+                return 0; // caller may use tblGrid widths before applying its fallback
             }
-            void Table(IXMLDOMNode * table)
+            std::wstring BorderRtf(IXMLDOMNode* border, const wchar_t* side)
             {
-                auto rows = Children(table);
-                for (const auto& row : rows) {
-                    if (NodeName(row.p) != L"tr") continue;
+                const std::wstring value = Attr(border, L"val");
+                if (value.empty() || value == L"nil" || value == L"none") return {};
+                const wchar_t* sideCode = std::wcscmp(side, L"top") == 0 ? L"t" :
+                    std::wcscmp(side, L"bottom") == 0 ? L"b" :
+                    std::wcscmp(side, L"left") == 0 ? L"l" : L"r";
+                std::wstring control = L"\\clbrdr" + std::wstring(sideCode);
+                if (value == L"double") control += L"\\brdrdb";
+                else if (value == L"dotted") control += L"\\brdrdot";
+                else if (value == L"dashed" || value == L"dashSmallGap") control += L"\\brdrdash";
+                else if (value == L"thick") control += L"\\brdrth";
+                else if (value == L"wave") control += L"\\brdrwavy";
+                else control += L"\\brdrs";
+                long size = 8;
+                ParseLong(Attr(border, L"sz"), size);
+                size = (std::max)(1L, (std::min)(96L, size));
+                control += L"\\brdrw" + std::to_wstring(size * 2);
+                control += ColorControl(Attr(border, L"color"), colorIndexes, L"brdrcf");
+                return control;
+            }
+
+            int CellSpan(IXMLDOMNode* cell) const
+            {
+                for (const auto& child : Children(cell)) if (NodeName(child.p) == L"tcPr")
+                    for (const auto& property : Children(child.p)) if (NodeName(property.p) == L"gridSpan") {
+                        long span = 1;
+                        if (ParseLong(Attr(property.p, L"val"), span)) return static_cast<int>((std::max)(1L, (std::min)(63L, span)));
+                    }
+                return 1;
+            }
+
+            std::wstring CellPropertiesRtf(IXMLDOMNode* cell, bool horizontalFirst,
+                bool horizontalContinue, const std::map<std::wstring, std::wstring>& tableBorders)
+            {
+                std::wstring out;
+                std::set<std::wstring> explicitBorders;
+                if (horizontalFirst) out += L"\\clmgf";
+                else if (horizontalContinue) out += L"\\clmrg";
+                for (const auto& child : Children(cell)) {
+                    if (NodeName(child.p) != L"tcPr") continue;
+                    for (const auto& property : Children(child.p)) {
+                        const std::wstring name = NodeName(property.p);
+                        if (name == L"vMerge") {
+                            const std::wstring value = Attr(property.p, L"val");
+                            out += (value == L"restart") ? L"\\clvmgf" : L"\\clvmrg";
+                        }
+                        else if (name == L"vAlign") {
+                            const std::wstring value = Attr(property.p, L"val");
+                            if (value == L"center") out += L"\\clvertalc";
+                            else if (value == L"bottom") out += L"\\clvertalb";
+                            else out += L"\\clvertalt";
+                        }
+                        else if (name == L"shd") {
+                            const std::wstring fill = Attr(property.p, L"fill");
+                            out += ColorControl(fill, colorIndexes, L"clcbpat");
+                        }
+                        else if (name == L"tcBorders") {
+                            for (const auto& border : Children(property.p)) {
+                                const std::wstring side = NodeName(border.p);
+                                if (side == L"top" || side == L"bottom" || side == L"left" || side == L"right") {
+                                    explicitBorders.insert(side);
+                                    out += BorderRtf(border.p, side.c_str());
+                                }
+                            }
+                        }
+                        else if (name == L"tcMar") {
+                            for (const auto& margin : Children(property.p)) {
+                                const std::wstring side = NodeName(margin.p);
+                                const std::wstring value = Attr(margin.p, L"w");
+                                long n = 0;
+                                if (!ParseLong(value, n) || n < 0 || n > 31680) continue;
+                                if (side == L"top" || side == L"bottom" || side == L"left" || side == L"right") {
+                                    const wchar_t* code = side == L"top" ? L"t" : side == L"bottom" ? L"b" : side == L"left" ? L"l" : L"r";
+                                    out += L"\\clpad" + std::wstring(code) + std::to_wstring(n) + L"\\clpadf" + code + L"3";
+                                }
+                            }
+                        }
+                    }
+                }
+                for (const auto& border : tableBorders)
+                    if (explicitBorders.find(border.first) == explicitBorders.end()) out += border.second;
+                return out;
+            }
+
+            void Table(IXMLDOMNode* table)
+            {
+                std::map<std::wstring, std::wstring> tableBorders;
+                for (const auto& property : Children(table)) if (NodeName(property.p) == L"tblPr")
+                    for (const auto& tblProperty : Children(property.p)) if (NodeName(tblProperty.p) == L"tblBorders")
+                        for (const auto& border : Children(tblProperty.p)) {
+                            const std::wstring side = NodeName(border.p);
+                            if (side == L"top" || side == L"bottom" || side == L"left" || side == L"right")
+                                tableBorders[side] = BorderRtf(border.p, side.c_str());
+                            else if (side == L"insideH") tableBorders[side] = BorderRtf(border.p, L"bottom");
+                            else if (side == L"insideV") tableBorders[side] = BorderRtf(border.p, L"right");
+                        }
+                std::vector<long> gridWidths;
+                for (const auto& child : Children(table)) if (NodeName(child.p) == L"tblGrid")
+                    for (const auto& column : Children(child.p)) if (NodeName(column.p) == L"gridCol") {
+                        long width = 0;
+                        if (ParseLong(Attr(column.p, L"w"), width) && width >= 100 && width <= 20000) gridWidths.push_back(width);
+                    }
+                std::vector<CComPtr<IXMLDOMNode>> tableRows;
+                for (const auto& row : Children(table)) if (NodeName(row.p) == L"tr") tableRows.push_back(row);
+                for (size_t rowIndex = 0; rowIndex < tableRows.size(); ++rowIndex) {
+                    const auto& row = tableRows[rowIndex];
+                    struct CellInfo { CComPtr<IXMLDOMNode> node; int span = 1; long width = 1800; bool hFirst = false; bool hContinue = false; };
+                    std::vector<CellInfo> rowCells;
+                    size_t gridIndex = 0;
+                    for (const auto& cell : Children(row.p)) {
+                        if (NodeName(cell.p) != L"tc") continue;
+                        CellInfo info; info.node = cell.p; info.span = CellSpan(cell.p); info.width = CellWidthTwips(cell.p);
+                        if (info.width <= 0 && !gridWidths.empty()) {
+                            for (int part = 0; part < info.span && gridIndex + part < gridWidths.size(); ++part) info.width += gridWidths[gridIndex + part];
+                        }
+                        if (info.width <= 0) info.width = 1800L * info.span;
+                        gridIndex += static_cast<size_t>(info.span);
+                        for (const auto& tcPr : Children(cell.p)) if (NodeName(tcPr.p) == L"tcPr")
+                            for (const auto& prop : Children(tcPr.p)) if (NodeName(prop.p) == L"hMerge") {
+                                const std::wstring value = Attr(prop.p, L"val");
+                                info.hFirst = value == L"restart";
+                                info.hContinue = value != L"restart";
+                            }
+                        rowCells.push_back(std::move(info));
+                    }
                     rtf += L"\\trowd\\trgaph108\\trleft0";
-                    auto cells = Children(row.p);
+                    for (const auto& prop : Children(row.p)) if (NodeName(prop.p) == L"trPr")
+                        for (const auto& setting : Children(prop.p)) {
+                            if (NodeName(setting.p) == L"cantSplit" && Attr(setting.p, L"val") != L"0" && Attr(setting.p, L"val") != L"false") rtf += L"\\trkeep";
+                            else if (NodeName(setting.p) == L"tblHeader" && Attr(setting.p, L"val") != L"0" && Attr(setting.p, L"val") != L"false") rtf += L"\\trhdr";
+                        }
                     long x = 0;
-                    for (const auto& cell : cells) {
-                        if (NodeName(cell.p) == L"tc") {
-                            x = (std::min)(1000000L, x + CellWidthTwips(cell.p));
+                    for (size_t cellIndex = 0; cellIndex < rowCells.size(); ++cellIndex) {
+                        const auto& cell = rowCells[cellIndex];
+                        const long partWidth = (std::max)(1L, cell.width / cell.span);
+                        std::map<std::wstring, std::wstring> cellBorders;
+                        auto copyBorder = [&](const wchar_t* source, const wchar_t* destination) {
+                            auto it = tableBorders.find(source);
+                            if (it != tableBorders.end()) cellBorders[destination] = it->second;
+                        };
+                        if (rowIndex == 0) copyBorder(L"top", L"top");
+                        if (rowIndex + 1 == tableRows.size()) copyBorder(L"bottom", L"bottom");
+                        if (rowIndex + 1 < tableRows.size()) copyBorder(L"insideH", L"bottom");
+                        if (cellIndex == 0) copyBorder(L"left", L"left");
+                        if (cellIndex + 1 == rowCells.size()) copyBorder(L"right", L"right");
+                        if (cellIndex + 1 < rowCells.size()) copyBorder(L"insideV", L"right");
+                        for (int part = 0; part < cell.span; ++part) {
+                            const bool mergedFirst = cell.span > 1 ? part == 0 : cell.hFirst;
+                            const bool mergedContinue = cell.span > 1 ? part > 0 : cell.hContinue;
+                            rtf += CellPropertiesRtf(cell.node.p, mergedFirst, mergedContinue, cellBorders);
+                            x = (std::min)(1000000L, x + partWidth);
                             rtf += L"\\cellx" + std::to_wstring(x);
                         }
                     }
-                    rtf += L"\n";
-                    for (const auto& cell : cells) {
-                        if (NodeName(cell.p) != L"tc") continue;
+                    rtf += L"\\n";
+                    for (const auto& cell : rowCells) {
                         rtf += L"\\intbl ";
-                        auto blocks = Children(cell.p);
+                        auto blocks = Children(cell.node.p);
                         for (const auto& block : blocks) {
                             const auto name = NodeName(block.p);
                             if (name == L"p") Paragraph(block.p, true);
                             else if (name == L"tbl") Table(block.p);
                         }
-                        rtf += L"\\cell ";
+                        for (int part = 0; part < cell.span; ++part) rtf += L"\\cell ";
                     }
-                    rtf += L"\\row\n";
+                    rtf += L"\\row\\n";
                 }
             }
         };
@@ -726,7 +1381,33 @@ static Result ConvertToRtfOnSta(const std::wstring& fileName,
     if (!LoadXmlFromMemory(archive, documentPath, doc)) { result.error = L"Unable to parse the DOCX document XML."; return result; }
     CComPtr<IXMLDOMElement> root;
     if (FAILED(doc->get_documentElement(&root)) || !root) { result.error = L"The DOCX document XML has no root element."; return result; }
-    ImportContext context{ archive, std::move(rels), options, result };
+    CComPtr<IXMLDOMDocument2> stylesDoc, numberingDoc;
+    CComPtr<IXMLDOMElement> stylesRoot, numberingRoot;
+    const std::wstring stylesPath = L"word\\styles.xml";
+    const std::wstring numberingPath = L"word\\numbering.xml";
+    std::set<std::wstring> colors;
+    std::set<std::wstring> fonts;
+    CollectColors(root.p, colors);
+    CollectFonts(root.p, fonts);
+    const std::wstring foldedStylesPath = L"word\\styles.xml";
+    if (archive.find(foldedStylesPath) != archive.end()) {
+        if (LoadXmlFromMemory(archive, stylesPath, stylesDoc) && SUCCEEDED(stylesDoc->get_documentElement(&stylesRoot)) && stylesRoot) {
+            CollectColors(stylesRoot.p, colors);
+            CollectFonts(stylesRoot.p, fonts);
+        }
+        else result.warnings.push_back(L"DOCX styles.xml could not be parsed; direct formatting will be used.");
+    }
+    const std::wstring foldedNumberingPath = L"word\\numbering.xml";
+    if (archive.find(foldedNumberingPath) != archive.end()) {
+        if (LoadXmlFromMemory(archive, numberingPath, numberingDoc) && SUCCEEDED(numberingDoc->get_documentElement(&numberingRoot)) && numberingRoot) {
+            CollectColors(numberingRoot.p, colors);
+            CollectFonts(numberingRoot.p, fonts);
+        }
+        else result.warnings.push_back(L"DOCX numbering.xml could not be parsed; automatic numbering will be omitted.");
+    }
+    ImportContext context{ archive, std::move(rels), options, result, colors, fonts };
+    if (stylesRoot) context.LoadStyles(stylesRoot.p);
+    if (numberingRoot) context.LoadNumbering(numberingRoot.p);
     auto rootChildren = Children(root.p);
     for (const auto& child : rootChildren) {
         if (NodeName(child.p) == L"body") {
